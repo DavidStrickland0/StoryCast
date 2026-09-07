@@ -7,6 +7,13 @@ using StoryCast.Ollama;
 
 internal static class DialogueCommands
 {
+    /// <summary>
+    /// Attributes dialogue for a complete book or one requested chapter.
+    /// </summary>
+    /// <param name="args">The dialogue-attribution arguments.</param>
+    /// <returns>
+    /// A task containing zero on success; otherwise, a nonzero exit code.
+    /// </returns>
     public static async Task<int> AttributeAsync(string[] args)
     {
         if (args.Length == 0 ||
@@ -29,6 +36,9 @@ internal static class DialogueCommands
                 throw new ArgumentException(
                     "Specify --model or set STORYCAST_OLLAMA_MODEL.");
 
+            var chapterId =
+                GetOptionValue(args, "--chapter");
+
             var ollamaUrl =
                 GetOptionValue(args, "--ollama-url") ??
                 "http://localhost:11434/";
@@ -48,7 +58,8 @@ internal static class DialogueCommands
                 bookPath,
                 model,
                 ollamaUrl,
-                force);
+                force,
+                chapterId);
         }
         catch (ArgumentException exception)
         {
@@ -61,7 +72,8 @@ internal static class DialogueCommands
         string bookPath,
         string model,
         string ollamaUrl,
-        bool force)
+        bool force,
+        string? chapterId)
     {
         try
         {
@@ -104,7 +116,8 @@ internal static class DialogueCommands
 
             var result = await workflow.ExecuteAsync(
                 book,
-                force: force);
+                force: force,
+                chapterId: chapterId);
 
             var scriptDirectory = Path.Combine(
                 book.RootPath,

@@ -7,6 +7,13 @@ using StoryCast.Ollama;
 
 internal static class CharacterCommands
 {
+    /// <summary>
+    /// Discovers characters for a complete book or one requested chapter.
+    /// </summary>
+    /// <param name="args">The character-discovery arguments.</param>
+    /// <returns>
+    /// A task containing zero on success; otherwise, a nonzero exit code.
+    /// </returns>
     public static async Task<int> DiscoverAsync(string[] args)
     {
         if (args.Length == 0 ||
@@ -41,6 +48,9 @@ internal static class CharacterCommands
                 throw new ArgumentException(
                     "Specify --model or set STORYCAST_OLLAMA_MODEL.");
 
+            var chapterId =
+                GetOptionValue(args, "--chapter");
+
             var ollamaUrl =
                 GetOptionValue(args, "--ollama-url") ??
                 "http://localhost:11434/";
@@ -56,7 +66,8 @@ internal static class CharacterCommands
                 bookPath,
                 model,
                 ollamaUrl,
-                force);
+                force,
+                chapterId);
         }
         catch (ArgumentException exception)
         {
@@ -69,7 +80,8 @@ internal static class CharacterCommands
         string bookPath,
         string model,
         string ollamaUrl,
-        bool force)
+        bool force,
+        string? chapterId)
     {
         try
         {
@@ -113,7 +125,8 @@ internal static class CharacterCommands
                 book,
                 force: force,
                 progress:
-                    new CharacterDiscoveryConsoleProgress());
+                    new CharacterDiscoveryConsoleProgress(),
+                chapterId: chapterId);
 
             Console.WriteLine();
             Console.WriteLine("Character discovery complete.");

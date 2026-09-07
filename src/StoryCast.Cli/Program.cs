@@ -7,6 +7,15 @@ return await RunAsync(args);
 
 static async Task<int> RunAsync(string[] args)
 {
+    if (args.Length >= 2 &&
+        EqualsArgument(args[0], "produce") &&
+        EqualsArgument(args[1], "next") &&
+        HasOption(args, "--help", "-h"))
+    {
+        IncrementalProductionCommands.WriteHelp();
+        return 0;
+    }
+
     if (args.Length == 0 || HasOption(args, "--help", "-h"))
     {
         WriteHelp();
@@ -63,6 +72,14 @@ static async Task<int> RunAsync(string[] args)
     {
         return await CastingCommands.AssignAsync(args[2..]);
     }
+    if (args.Length >= 2 &&
+        EqualsArgument(args[0], "produce") &&
+        EqualsArgument(args[1], "next"))
+    {
+        return await IncrementalProductionCommands.ProduceNextAsync(
+            args[2..]);
+    }
+
     if (args.Length >= 2 &&
         EqualsArgument(args[0], "produce") &&
         EqualsArgument(args[1], "book"))
@@ -335,6 +352,7 @@ static void WriteHelp()
           storycast characters discover <book-directory> --model <model>
           storycast dialogue attribute <book-directory> --model <model>
           storycast cast assign <book-directory> --model <model> [--library <path>]
+          storycast produce next <book-directory> --model <model> [--library <path>] [--worker-image <image>] [--whisper-model <model>]
           storycast produce chapter <book-directory> <chapter-id> [--library <path>] [--resume-run <path>] [--worker-image <image>]
           storycast produce book <book-directory> [--library <path>] [--resume-book-run <path>] [--worker-image <image>] [--chapter-pause <seconds>]
 
@@ -347,6 +365,7 @@ static void WriteHelp()
           characters discover  Discover and persist speaking characters.
           dialogue attribute    Assign every dialogue line to a character.
           cast assign         Assign verified voices to audiobook roles.
+          produce next        Process the next incomplete chapter end to end.
           produce chapter     Synthesize, verify, assemble, and master a chapter.
           produce book        Produce every configured chapter in order.
 
@@ -358,7 +377,14 @@ static void WriteHelp()
           --resume-run        Continue an incomplete chapter run.
           --resume-book-run   Continue an incomplete book run.
           --worker-image      Docker worker image. Defaults to storycast-worker:dev.
+          --whisper-model     Whisper verification model. Defaults to small.en.
           --chapter-pause     Silence between chapters. Defaults to 1.0 seconds.
+
+        Incremental production:
+          produce next handles one chapter per invocation. It resumes a failed
+          chapter, preserves book-wide character identities and existing voice
+          assignments, and exits 0 without work when all current chapters are
+          complete. Use produce next --help for artifact and workflow details.
           --help, -h     Display this help.
         """);
 }
