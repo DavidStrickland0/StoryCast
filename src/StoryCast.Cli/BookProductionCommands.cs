@@ -61,6 +61,15 @@ internal static class BookProductionCommands
                     "tools",
                     "assemble_book.py"));
 
+            var verificationScriptPath = Path.GetFullPath(
+                GetOptionValue(
+                    args,
+                    "--book-verification-script") ??
+                Path.Combine(
+                    Directory.GetCurrentDirectory(),
+                    "tools",
+                    "verify_book.py"));
+
             var chapterPauseText =
                 GetOptionValue(
                     args,
@@ -137,6 +146,14 @@ internal static class BookProductionCommands
                     $"Book assembly worker was not found: " +
                     $"{assemblyScriptPath}",
                     assemblyScriptPath);
+            }
+
+            if (!File.Exists(verificationScriptPath))
+            {
+                throw new FileNotFoundException(
+                    $"Book verification worker was not found: " +
+                    $"{verificationScriptPath}",
+                    verificationScriptPath);
             }
 
             var loader = new FileSystemBookProjectLoader();
@@ -555,12 +572,55 @@ internal static class BookProductionCommands
                     assemblyManifestPath);
             }
 
+            manifest.Status = "verifying";
+
+            await WriteManifestAsync(
+                manifestPath,
+                manifest);
+
+            var wslVerificationScript =
+                await ConvertToWslPathAsync(
+                    verificationScriptPath);
+
+            var wslAssemblyManifest =
+                await ConvertToWslPathAsync(
+                    assemblyManifestPath);
+
+            var verificationExitCode =
+                await RunBookVerificationWorkerAsync(
+                    python,
+                    wslVerificationScript,
+                    wslAssemblyManifest,
+                    whisperModel,
+                    cudaLibraryPath);
+
+            if (verificationExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Book verification failed with exit code " +
+                    $"{verificationExitCode}.");
+            }
+
+            var verificationPath = Path.Combine(
+                runDirectory,
+                "book-verification.json");
+
+            if (!File.Exists(verificationPath))
+            {
+                throw new FileNotFoundException(
+                    $"Book verification report was not found: " +
+                    $"{verificationPath}",
+                    verificationPath);
+            }
+
             manifest.Status = "completed";
             manifest.CurrentChapterId = null;
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
             manifest.AudioPath = audiobookPath;
             manifest.AssemblyManifestPath =
                 assemblyManifestPath;
+            manifest.VerificationPath =
+                verificationPath;
 
             await WriteManifestAsync(
                 manifestPath,
@@ -668,6 +728,48 @@ internal static class BookProductionCommands
         {
             throw new InvalidOperationException(
                 "Unable to start the WSL book assembly worker.");
+        }
+
+        await process.WaitForExitAsync();
+
+        return process.ExitCode;
+    }
+
+    private static async Task<int>
+        RunBookVerificationWorkerAsync(
+            string python,
+            string scriptPath,
+            string assemblyManifestPath,
+            string whisperModel,
+            string cudaLibraryPath)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "wsl.exe",
+            UseShellExecute = false
+        };
+
+        startInfo.ArgumentList.Add("--exec");
+        startInfo.ArgumentList.Add("env");
+        startInfo.ArgumentList.Add(
+            $"LD_LIBRARY_PATH={cudaLibraryPath}");
+        startInfo.ArgumentList.Add(
+            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True");
+        startInfo.ArgumentList.Add(python);
+        startInfo.ArgumentList.Add(scriptPath);
+        startInfo.ArgumentList.Add(assemblyManifestPath);
+        startInfo.ArgumentList.Add("--model");
+        startInfo.ArgumentList.Add(whisperModel);
+
+        using var process = new Process
+        {
+            StartInfo = startInfo
+        };
+
+        if (!process.Start())
+        {
+            throw new InvalidOperationException(
+                "Unable to start the WSL book verification worker.");
         }
 
         await process.WaitForExitAsync();
@@ -852,6 +954,8 @@ internal static class BookProductionCommands
         public string? AudioPath { get; set; }
 
         public string? AssemblyManifestPath { get; set; }
+
+        public string? VerificationPath { get; set; }
     }
 
     private sealed class BookAssemblyRequest
