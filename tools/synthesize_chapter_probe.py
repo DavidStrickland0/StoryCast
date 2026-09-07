@@ -25,6 +25,30 @@ def load_json(path: Path) -> dict:
         return json.load(stream)
 
 
+def write_json_atomic(
+    path: Path,
+    value: dict,
+) -> None:
+    temporary_path = path.with_name(
+        f".{path.name}.tmp"
+    )
+
+    with temporary_path.open(
+        "w",
+        encoding="utf-8",
+        newline="\n",
+    ) as stream:
+        json.dump(
+            value,
+            stream,
+            indent=2,
+            ensure_ascii=False,
+        )
+        stream.write("\n")
+
+    temporary_path.replace(path)
+
+
 def load_voice_samples(
     library: Path,
 ) -> dict[str, Path]:
@@ -101,6 +125,10 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--resume",
+        action="store_true",
+    )
+    parser.add_argument(
         "--segment-index",
         type=int,
         action="append",
@@ -149,6 +177,22 @@ def main() -> int:
         args.segment_index or []
     )
     is_retry = bool(selected_indexes)
+    is_resume = args.resume
+
+    if is_retry and is_resume:
+        raise RuntimeError(
+            "--resume cannot be combined with --segment-index."
+        )
+
+    if is_resume and args.run_directory is None:
+        raise RuntimeError(
+            "Resume synthesis requires --run-directory."
+        )
+
+    if is_resume and args.attempt != 0:
+        raise RuntimeError(
+            "Resume synthesis requires --attempt 0."
+        )
 
     if is_retry and args.run_directory is None:
         raise RuntimeError(
@@ -189,7 +233,7 @@ def main() -> int:
             args.run_directory.resolve()
         )
 
-        if is_retry:
+        if is_retry or is_resume:
             if not run_directory.is_dir():
                 raise FileNotFoundError(
                     f"Retry run directory was not found: "
@@ -206,8 +250,125 @@ def main() -> int:
     )
 
     chapter_directory.mkdir(
-        exist_ok=is_retry,
+        exist_ok=is_retry or is_resume,
     )
+
+    manifest_path = (
+        chapter_directory /
+        "chapter.json"
+    )
+
+    manifest = {
+        "schemaVersion": 1,
+        "chapterId": args.chapter,
+        "sourceSha256": artifact["sourceSha256"],
+        "preparationVersion":
+            artifact["preparationVersion"],
+        "settings": {
+            "exaggeration": EXAGGERATION,
+            "cfgWeight": CFG_WEIGHT,
+            "temperature": TEMPERATURE,
+        },
+        "segments": [],
+    }
+
+    if is_retry or is_resume:
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Existing chapter checkpoint was not found: "
+                f"{manifest_path}"
+            )
+
+        existing_manifest = load_json(
+            manifest_path
+        )
+
+        if (
+            existing_manifest.get("chapterId") !=
+                args.chapter or
+            existing_manifest.get("sourceSha256") !=
+                artifact["sourceSha256"] or
+            existing_manifest.get("preparationVersion") !=
+                artifact["preparationVersion"]
+        ):
+            raise RuntimeError(
+                "Existing chapter checkpoint does not match "
+                "the current production script."
+            )
+
+        manifest = existing_manifest
+    else:
+        write_json_atomic(
+            manifest_path,
+            manifest,
+        )
+
+    reused_segments = 0
+
+    if is_resume:
+        existing_by_index = {
+            segment["index"]: segment
+            for segment in manifest["segments"]
+        }
+
+        remaining_segments: list[dict] = []
+
+        for segment in segments:
+            segment_index = segment["index"]
+            speaker_id = segment["speakerId"]
+            voice_id = assignments.get(
+                speaker_id.lower()
+            )
+            existing = existing_by_index.get(
+                segment_index
+            )
+            expected_audio_path = (
+                chapter_directory /
+                f"segment-{segment_index:04d}.wav"
+            ).resolve()
+
+            reusable = (
+                existing is not None and
+                voice_id is not None and
+                existing.get("kind") ==
+                    segment["kind"] and
+                existing.get("speakerId") ==
+                    speaker_id and
+                existing.get("voiceId") ==
+                    voice_id and
+                existing.get("sourceText") ==
+                    segment["sourceText"] and
+                existing.get("attempt") == 0 and
+                Path(
+                    existing.get(
+                        "audioPath",
+                        "")
+                ).resolve() == expected_audio_path and
+                expected_audio_path.is_file()
+            )
+
+            if reusable:
+                try:
+                    audio_info = torchaudio.info(
+                        str(expected_audio_path)
+                    )
+
+                    reusable = (
+                        audio_info.num_frames > 0 and
+                        audio_info.sample_rate ==
+                            existing.get("sampleRate")
+                    )
+                except Exception:
+                    reusable = False
+
+            if reusable:
+                reused_segments += 1
+            else:
+                remaining_segments.append(
+                    segment
+                )
+
+        segments = remaining_segments
 
     device = (
         "cuda"
@@ -219,15 +380,27 @@ def main() -> int:
     print(f"Chapter:  {args.chapter}", flush=True)
     print(f"Segments: {len(segments)}", flush=True)
     print(f"Attempt:  {args.attempt}", flush=True)
+    print(f"Reused:   {reused_segments}", flush=True)
     print(f"Device:   {device}", flush=True)
-    print()
-    print("Loading Chatterbox...", flush=True)
+    model = None
 
-    model = ChatterboxTTS.from_pretrained(
-        device=device
-    )
+    if segments:
+        print()
+        print(
+            "Loading Chatterbox...",
+            flush=True,
+        )
+
+        model = ChatterboxTTS.from_pretrained(
+            device=device
+        )
 
     generated_segments: list[dict] = []
+
+    if segments and model is None:
+        raise RuntimeError(
+            "Chatterbox failed to initialize."
+        )
 
     for position, segment in enumerate(
         segments,
@@ -319,7 +492,7 @@ def main() -> int:
             audio.shape[-1] / model.sr
         )
 
-        generated_segments.append(
+        generated_segment = (
             {
                 "index": segment_index,
                 "kind": segment["kind"],
@@ -339,76 +512,33 @@ def main() -> int:
             }
         )
 
+        generated_segments.append(
+            generated_segment
+        )
+
+        manifest["segments"] = [
+            existing
+            for existing in manifest["segments"]
+            if existing["index"] != segment_index
+        ]
+
+        manifest["segments"].append(
+            generated_segment
+        )
+
+        manifest["segments"].sort(
+            key=lambda item: item["index"]
+        )
+
+        write_json_atomic(
+            manifest_path,
+            manifest,
+        )
+
         del audio
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-    manifest = {
-        "schemaVersion": 1,
-        "chapterId": args.chapter,
-        "sourceSha256": artifact["sourceSha256"],
-        "preparationVersion":
-            artifact["preparationVersion"],
-        "settings": {
-            "exaggeration": EXAGGERATION,
-            "cfgWeight": CFG_WEIGHT,
-            "temperature": TEMPERATURE,
-        },
-        "segments": generated_segments,
-    }
-
-    manifest_path = (
-        chapter_directory / "chapter.json"
-    )
-
-    if is_retry:
-        if not manifest_path.is_file():
-            raise FileNotFoundError(
-                f"Existing chapter manifest was not found: "
-                f"{manifest_path}"
-            )
-
-        existing_manifest = load_json(
-            manifest_path
-        )
-
-        replacements = {
-            segment["index"]: segment
-            for segment in generated_segments
-        }
-
-        existing_manifest["segments"] = [
-            replacements.get(
-                segment["index"],
-                segment,
-            )
-            for segment in existing_manifest["segments"]
-        ]
-
-        manifest = existing_manifest
-
-    temporary_manifest_path = (
-        chapter_directory /
-        ".chapter.json.tmp"
-    )
-
-    with temporary_manifest_path.open(
-        "w",
-        encoding="utf-8",
-        newline="\n",
-    ) as stream:
-        json.dump(
-            manifest,
-            stream,
-            indent=2,
-            ensure_ascii=False,
-        )
-        stream.write("\n")
-
-    temporary_manifest_path.replace(
-        manifest_path
-    )
 
     total_duration = sum(
         segment["durationSeconds"]

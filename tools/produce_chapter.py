@@ -299,6 +299,11 @@ def main() -> int:
         "masteredAudioPath": None,
     }
 
+    write_run_manifest(
+        run_manifest_path,
+        report,
+    )
+
     current_stage = "initialization"
 
     try:
