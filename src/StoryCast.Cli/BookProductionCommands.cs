@@ -6,6 +6,7 @@ internal static class BookProductionCommands
     private static readonly JsonSerializerOptions SerializerOptions =
         new()
         {
+            PropertyNameCaseInsensitive = true,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
             WriteIndented = true
         };
@@ -55,6 +56,17 @@ internal static class BookProductionCommands
                     "--whisper-model") ??
                 "small.en";
 
+            var resumeRunValue =
+                GetOptionValue(
+                    args,
+                    "--resume-book-run");
+
+            var resumeRunPath =
+                resumeRunValue is null
+                    ? null
+                    : Path.GetFullPath(
+                        resumeRunValue);
+
             var python =
                 GetOptionValue(args, "--python") ??
                 "/home/user/.venvs/storycast/bin/python";
@@ -92,61 +104,149 @@ internal static class BookProductionCommands
             var loader = new FileSystemBookProjectLoader();
             var book = await loader.LoadAsync(bookPath);
 
-            var timestamp = DateTimeOffset.UtcNow.ToString(
-                "yyyyMMdd-HHmmss-fff");
+            string runDirectory;
 
-            var runId =
-                $"{timestamp}-book-{Guid.NewGuid():N}"[..(
-                    timestamp.Length + 14)];
-
-            var runDirectory = Path.Combine(
-                book.RootPath,
-                "output",
-                runId);
-
-            var chaptersDirectory = Path.Combine(
-                runDirectory,
-                "chapters");
-
-            Directory.CreateDirectory(chaptersDirectory);
-
-            manifestPath = Path.Combine(
-                runDirectory,
-                "book-run.json");
-
-            manifest = new BookRunManifest
+            if (resumeRunPath is not null)
             {
-                SchemaVersion = 1,
-                RunId = runId,
-                BookId = book.Id,
-                Title = book.Title,
-                Author = book.Author,
-                BookPath = book.RootPath,
-                VoiceLibraryPath = libraryPath,
-                StartedUtc = DateTimeOffset.UtcNow,
-                Status = "running",
-                Settings = new BookRunSettings
+                runDirectory = resumeRunPath;
+
+                if (!Directory.Exists(runDirectory))
                 {
-                    WhisperModel = whisperModel
-                },
-                Chapters = book.Manuscript.Chapters
-                    .Select(
-                        chapter => new BookRunChapter
-                        {
-                            Index = chapter.Index,
-                            ChapterId = chapter.Id,
-                            Status = "pending",
-                            RunDirectory = Path.Combine(
-                                chaptersDirectory,
-                                chapter.Id)
-                        })
-                    .ToList()
-            };
+                    throw new DirectoryNotFoundException(
+                        $"Resume book-run directory was not found: " +
+                        $"{runDirectory}");
+                }
+
+                manifestPath = Path.Combine(
+                    runDirectory,
+                    "book-run.json");
+
+                manifest = await LoadBookRunAsync(
+                    manifestPath);
+
+                if (manifest.SchemaVersion != 1)
+                {
+                    throw new InvalidDataException(
+                        "Resume book-run schema version is unsupported.");
+                }
+
+                if (manifest.Status == "completed")
+                {
+                    throw new InvalidOperationException(
+                        "A completed book run cannot be resumed.");
+                }
+
+                if (!string.Equals(
+                        manifest.BookId,
+                        book.Id,
+                        StringComparison.Ordinal) ||
+                    !string.Equals(
+                        Path.GetFullPath(manifest.BookPath),
+                        book.RootPath,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        Path.GetFullPath(
+                            manifest.VoiceLibraryPath),
+                        libraryPath,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        manifest.Settings.WhisperModel,
+                        whisperModel,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "Resume book-run identity or settings do not " +
+                        "match the requested production.");
+                }
+
+                var expectedChapterIds =
+                    book.Manuscript.Chapters
+                        .OrderBy(chapter => chapter.Index)
+                        .Select(chapter => chapter.Id)
+                        .ToArray();
+
+                var actualChapterIds =
+                    manifest.Chapters
+                        .OrderBy(chapter => chapter.Index)
+                        .Select(chapter => chapter.ChapterId)
+                        .ToArray();
+
+                if (!expectedChapterIds.SequenceEqual(
+                        actualChapterIds,
+                        StringComparer.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "Resume book-run chapters do not match the " +
+                        "current book manifest.");
+                }
+
+                manifest.Status = "running";
+                manifest.CurrentChapterId = null;
+                manifest.FailedChapterId = null;
+                manifest.CompletedUtc = null;
+                manifest.Error = null;
+                manifest.ResumeCount++;
+                manifest.LastResumedUtc =
+                    DateTimeOffset.UtcNow;
+            }
+            else
+            {
+                var timestamp = DateTimeOffset.UtcNow.ToString(
+                    "yyyyMMdd-HHmmss-fff");
+
+                var runId =
+                    $"{timestamp}-book-{Guid.NewGuid():N}"[..(
+                        timestamp.Length + 14)];
+
+                runDirectory = Path.Combine(
+                    book.RootPath,
+                    "output",
+                    runId);
+
+                var chaptersDirectory = Path.Combine(
+                    runDirectory,
+                    "chapters");
+
+                Directory.CreateDirectory(
+                    chaptersDirectory);
+
+                manifestPath = Path.Combine(
+                    runDirectory,
+                    "book-run.json");
+
+                manifest = new BookRunManifest
+                {
+                    SchemaVersion = 1,
+                    RunId = runId,
+                    BookId = book.Id,
+                    Title = book.Title,
+                    Author = book.Author,
+                    BookPath = book.RootPath,
+                    VoiceLibraryPath = libraryPath,
+                    StartedUtc = DateTimeOffset.UtcNow,
+                    Status = "running",
+                    Settings = new BookRunSettings
+                    {
+                        WhisperModel = whisperModel
+                    },
+                    Chapters = book.Manuscript.Chapters
+                        .Select(
+                            chapter => new BookRunChapter
+                            {
+                                Index = chapter.Index,
+                                ChapterId = chapter.Id,
+                                Status = "pending",
+                                RunDirectory = Path.Combine(
+                                    chaptersDirectory,
+                                    chapter.Id)
+                            })
+                        .ToList()
+                };
+            }
 
             await WriteManifestAsync(
                 manifestPath,
                 manifest);
-
             Console.WriteLine($"Book:          {book.Title}");
             Console.WriteLine($"Book ID:       {book.Id}");
             Console.WriteLine(
@@ -155,10 +255,41 @@ internal static class BookProductionCommands
             Console.WriteLine($"Whisper:       {whisperModel}");
             Console.WriteLine($"Run:           {runDirectory}");
 
+            if (resumeRunPath is not null)
+            {
+                Console.WriteLine(
+                    $"Resume count:  {manifest.ResumeCount}");
+            }
+
             foreach (var chapter in manifest.Chapters)
             {
-                manifest.CurrentChapterId = chapter.ChapterId;
+                if (chapter.Status == "completed")
+                {
+                    if (string.IsNullOrWhiteSpace(
+                            chapter.MasteredAudioPath) ||
+                        !File.Exists(
+                            chapter.MasteredAudioPath))
+                    {
+                        throw new InvalidDataException(
+                            $"Completed chapter " +
+                            $"{chapter.ChapterId} is missing its " +
+                            "mastered audio.");
+                    }
+
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        $"===== Book chapter " +
+                        $"{chapter.Index + 1}/" +
+                        $"{manifest.Chapters.Count}: " +
+                        $"{chapter.ChapterId} (reused) =====");
+
+                    continue;
+                }
+
+                manifest.CurrentChapterId =
+                    chapter.ChapterId;
                 chapter.Status = "running";
+                chapter.ExitCode = null;
 
                 await WriteManifestAsync(
                     manifestPath,
@@ -171,7 +302,23 @@ internal static class BookProductionCommands
                     $"{manifest.Chapters.Count}: " +
                     $"{chapter.ChapterId} =====");
 
-                var chapterArguments = new[]
+                var chapterRunManifestPath = Path.Combine(
+                    chapter.RunDirectory,
+                    "run.json");
+
+                var hasChapterRun =
+                    File.Exists(chapterRunManifestPath);
+
+                if (!hasChapterRun &&
+                    Directory.Exists(
+                        chapter.RunDirectory))
+                {
+                    throw new InvalidDataException(
+                        $"Chapter run directory exists without " +
+                        $"run.json: {chapter.RunDirectory}");
+                }
+
+                var chapterArguments = new List<string>
                 {
                     book.RootPath,
                     chapter.ChapterId,
@@ -184,14 +331,26 @@ internal static class BookProductionCommands
                     "--python",
                     python,
                     "--cuda-library-path",
-                    cudaLibraryPath,
-                    "--run-directory",
-                    chapter.RunDirectory
+                    cudaLibraryPath
                 };
+
+                if (hasChapterRun)
+                {
+                    chapterArguments.Add(
+                        "--resume-run");
+                }
+                else
+                {
+                    chapterArguments.Add(
+                        "--run-directory");
+                }
+
+                chapterArguments.Add(
+                    chapter.RunDirectory);
 
                 var exitCode =
                     await ProductionCommands.ProduceChapterAsync(
-                        chapterArguments);
+                        [.. chapterArguments]);
 
                 chapter.ExitCode = exitCode;
 
@@ -215,22 +374,40 @@ internal static class BookProductionCommands
                     return exitCode;
                 }
 
-                var chapterRunManifestPath = Path.Combine(
-                    chapter.RunDirectory,
-                    "run.json");
-
                 var chapterRun = await LoadChapterRunAsync(
                     chapterRunManifestPath);
 
+                if (!string.Equals(
+                        chapterRun.Status,
+                        "completed",
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"Chapter run did not report completion: " +
+                        $"{chapterRunManifestPath}");
+                }
+
+                var masteredAudioPath = Path.Combine(
+                    chapter.RunDirectory,
+                    chapter.ChapterId,
+                    $"{chapter.ChapterId}.mastered.wav");
+
+                if (!File.Exists(masteredAudioPath))
+                {
+                    throw new FileNotFoundException(
+                        $"Mastered chapter audio was not found: " +
+                        $"{masteredAudioPath}",
+                        masteredAudioPath);
+                }
+
                 chapter.Status = "completed";
                 chapter.MasteredAudioPath =
-                    chapterRun.MasteredAudioPath;
+                    masteredAudioPath;
 
                 await WriteManifestAsync(
                     manifestPath,
                     manifest);
             }
-
             manifest.Status = "completed";
             manifest.CurrentChapterId = null;
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
@@ -283,6 +460,20 @@ internal static class BookProductionCommands
             Console.Error.WriteLine(exception.Message);
             return 1;
         }
+    }
+
+    private static async Task<BookRunManifest>
+        LoadBookRunAsync(
+            string path)
+    {
+        await using var stream = File.OpenRead(path);
+
+        return await JsonSerializer.DeserializeAsync<
+            BookRunManifest>(
+                stream,
+                SerializerOptions) ??
+            throw new InvalidDataException(
+                $"Book run manifest could not be read: {path}");
     }
 
     private static async Task<ChapterRunSummary>
@@ -389,6 +580,10 @@ internal static class BookProductionCommands
         public required BookRunSettings Settings { get; init; }
 
         public required List<BookRunChapter> Chapters { get; init; }
+
+        public int ResumeCount { get; set; }
+
+        public DateTimeOffset? LastResumedUtc { get; set; }
     }
 
     private sealed class BookRunSettings
@@ -413,6 +608,8 @@ internal static class BookProductionCommands
 
     private sealed class ChapterRunSummary
     {
+        public string? Status { get; init; }
+
         public string? MasteredAudioPath { get; init; }
     }
 }
