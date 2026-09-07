@@ -9,8 +9,6 @@ from pathlib import Path
 import torch
 import torchaudio
 
-from chatterbox.tts import ChatterboxTTS
-
 
 EXAGGERATION = 0.5
 CFG_WEIGHT = 0.5
@@ -388,6 +386,8 @@ def main() -> int:
     model = None
 
     if segments:
+        from chatterbox.tts import ChatterboxTTS
+
         print()
         print(
             "Loading Chatterbox...",
