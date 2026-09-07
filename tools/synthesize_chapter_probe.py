@@ -100,6 +100,18 @@ def main() -> int:
         default=None,
     )
 
+    parser.add_argument(
+        "--segment-index",
+        type=int,
+        action="append",
+        default=None,
+    )
+    parser.add_argument(
+        "--attempt",
+        type=int,
+        default=0,
+    )
+
     args = parser.parse_args()
 
     book = args.book.resolve()
@@ -133,6 +145,41 @@ def main() -> int:
             f"Chapter contains no segments: {args.chapter}"
         )
 
+    selected_indexes = set(
+        args.segment_index or []
+    )
+    is_retry = bool(selected_indexes)
+
+    if is_retry and args.run_directory is None:
+        raise RuntimeError(
+            "Selective synthesis requires --run-directory."
+        )
+
+    if is_retry and args.attempt < 1:
+        raise RuntimeError(
+            "Selective synthesis requires --attempt of at least 1."
+        )
+
+    available_indexes = {
+        segment["index"]
+        for segment in segments
+    }
+    unknown_indexes = (
+        selected_indexes - available_indexes
+    )
+
+    if unknown_indexes:
+        raise RuntimeError(
+            f"Unknown segment indexes: {sorted(unknown_indexes)}"
+        )
+
+    if is_retry:
+        segments = [
+            segment
+            for segment in segments
+            if segment["index"] in selected_indexes
+        ]
+
     if args.run_directory is None:
         run_directory = create_run_directory(
             book
@@ -141,16 +188,26 @@ def main() -> int:
         run_directory = (
             args.run_directory.resolve()
         )
-        run_directory.mkdir(
-            parents=True,
-            exist_ok=False,
-        )
+
+        if is_retry:
+            if not run_directory.is_dir():
+                raise FileNotFoundError(
+                    f"Retry run directory was not found: "
+                    f"{run_directory}"
+                )
+        else:
+            run_directory.mkdir(
+                parents=True,
+                exist_ok=False,
+            )
 
     chapter_directory = (
         run_directory / args.chapter
     )
 
-    chapter_directory.mkdir()
+    chapter_directory.mkdir(
+        exist_ok=is_retry,
+    )
 
     device = (
         "cuda"
@@ -161,6 +218,7 @@ def main() -> int:
     print(f"Run:      {run_directory}", flush=True)
     print(f"Chapter:  {args.chapter}", flush=True)
     print(f"Segments: {len(segments)}", flush=True)
+    print(f"Attempt:  {args.attempt}", flush=True)
     print(f"Device:   {device}", flush=True)
     print()
     print("Loading Chatterbox...", flush=True)
@@ -204,7 +262,11 @@ def main() -> int:
                 f"voice '{voice_id}'."
             )
 
-        seed = 10000 + segment_index
+        seed = (
+            10000 +
+            segment_index +
+            args.attempt * 100000
+        )
 
         torch.manual_seed(seed)
 
@@ -214,6 +276,11 @@ def main() -> int:
         output_path = (
             chapter_directory /
             f"segment-{segment_index:04d}.wav"
+        )
+
+        temporary_output_path = (
+            chapter_directory /
+            f".segment-{segment_index:04d}.wav.tmp"
         )
 
         print(
@@ -238,9 +305,14 @@ def main() -> int:
         )
 
         torchaudio.save(
-            str(output_path),
+            str(temporary_output_path),
             audio,
             model.sr,
+            format="wav",
+        )
+
+        temporary_output_path.replace(
+            output_path
         )
 
         duration_seconds = (
@@ -259,6 +331,7 @@ def main() -> int:
                     "",
                 ),
                 "seed": seed,
+                "attempt": args.attempt,
                 "sampleRate": model.sr,
                 "durationSeconds":
                     duration_seconds,
@@ -289,7 +362,38 @@ def main() -> int:
         chapter_directory / "chapter.json"
     )
 
-    with manifest_path.open(
+    if is_retry:
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Existing chapter manifest was not found: "
+                f"{manifest_path}"
+            )
+
+        existing_manifest = load_json(
+            manifest_path
+        )
+
+        replacements = {
+            segment["index"]: segment
+            for segment in generated_segments
+        }
+
+        existing_manifest["segments"] = [
+            replacements.get(
+                segment["index"],
+                segment,
+            )
+            for segment in existing_manifest["segments"]
+        ]
+
+        manifest = existing_manifest
+
+    temporary_manifest_path = (
+        chapter_directory /
+        ".chapter.json.tmp"
+    )
+
+    with temporary_manifest_path.open(
         "w",
         encoding="utf-8",
         newline="\n",
@@ -302,14 +406,18 @@ def main() -> int:
         )
         stream.write("\n")
 
+    temporary_manifest_path.replace(
+        manifest_path
+    )
+
     total_duration = sum(
         segment["durationSeconds"]
-        for segment in generated_segments
+        for segment in manifest["segments"]
     )
 
     print()
     print("Chapter synthesis complete.")
-    print(f"Segments: {len(generated_segments)}")
+    print(f"Segments: {len(manifest['segments'])}")
     print(f"Duration: {total_duration:.2f} seconds")
     print(f"Manifest: {manifest_path}")
 

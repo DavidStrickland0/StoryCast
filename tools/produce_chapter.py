@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import uuid
@@ -36,6 +37,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.18,
     )
+    parser.add_argument(
+        "--max-segment-attempts",
+        type=int,
+        default=3,
+    )
     return parser.parse_args()
 
 
@@ -57,7 +63,8 @@ def create_run_path(book: Path) -> Path:
 def run_stage(
     name: str,
     arguments: list[str],
-) -> None:
+    allowed_exit_codes: tuple[int, ...] = (0,),
+) -> int:
     print()
     print(f"===== {name} =====", flush=True)
 
@@ -66,11 +73,21 @@ def run_stage(
         check=False,
     )
 
-    if result.returncode != 0:
+    if result.returncode not in allowed_exit_codes:
         raise RuntimeError(
             f"{name} failed with exit code "
             f"{result.returncode}."
         )
+
+    return result.returncode
+
+
+def load_json(path: Path) -> dict:
+    with path.open(
+        "r",
+        encoding="utf-8-sig",
+    ) as stream:
+        return json.load(stream)
 
 
 def write_run_manifest(
@@ -102,8 +119,141 @@ def write_run_manifest(
     temporary_path.replace(path)
 
 
+def verify_segments_with_retries(
+    tools_directory: Path,
+    book: Path,
+    voice_library: Path,
+    chapter_id: str,
+    run_directory: Path,
+    chapter_manifest: Path,
+    whisper_model: str,
+    max_attempts: int,
+    attempt_history: list[dict],
+) -> None:
+    verification_path = (
+        chapter_manifest.parent /
+        "verification.json"
+    )
+
+    for attempt in range(
+        1,
+        max_attempts + 1,
+    ):
+        exit_code = run_stage(
+            f"Segment verification attempt {attempt}",
+            [
+                sys.executable,
+                str(
+                    tools_directory /
+                    "verify_chapter_probe.py"
+                ),
+                str(chapter_manifest),
+                "--model",
+                whisper_model,
+            ],
+            allowed_exit_codes=(0, 2),
+        )
+
+        verification = load_json(
+            verification_path
+        )
+
+        rejected_segments = [
+            segment
+            for segment in verification["segments"]
+            if segment["status"] != "pass"
+        ]
+
+        attempt_report_path = (
+            chapter_manifest.parent /
+            f"verification-attempt-{attempt}.json"
+        )
+
+        shutil.copy2(
+            verification_path,
+            attempt_report_path,
+        )
+
+        attempt_history.append(
+            {
+                "attempt": attempt,
+                "verificationPath":
+                    str(attempt_report_path),
+                "passed":
+                    verification["summary"]["passed"],
+                "review":
+                    verification["summary"]["review"],
+                "failed":
+                    verification["summary"]["failed"],
+                "rejectedSegmentIndexes": [
+                    segment["segmentIndex"]
+                    for segment in rejected_segments
+                ],
+            }
+        )
+
+        if exit_code == 0:
+            if rejected_segments:
+                raise RuntimeError(
+                    "Verification returned success while "
+                    "reporting rejected segments."
+                )
+
+            return
+
+        if not rejected_segments:
+            raise RuntimeError(
+                "Verification returned failure without "
+                "identifying rejected segments."
+            )
+
+        if attempt >= max_attempts:
+            indexes = [
+                segment["segmentIndex"]
+                for segment in rejected_segments
+            ]
+
+            raise RuntimeError(
+                f"Segments {indexes} did not pass after "
+                f"{max_attempts} attempts."
+            )
+
+        synthesis_arguments = [
+            sys.executable,
+            str(
+                tools_directory /
+                "synthesize_chapter_probe.py"
+            ),
+            str(book),
+            str(voice_library),
+            "--chapter",
+            chapter_id,
+            "--run-directory",
+            str(run_directory),
+            "--attempt",
+            str(attempt),
+        ]
+
+        for segment in rejected_segments:
+            synthesis_arguments.extend(
+                [
+                    "--segment-index",
+                    str(segment["segmentIndex"]),
+                ]
+            )
+
+        run_stage(
+            f"Selective synthesis retry {attempt}",
+            synthesis_arguments,
+        )
+
 def main() -> int:
     args = parse_args()
+
+    if args.max_segment_attempts < 1:
+        raise ValueError(
+            "--max-segment-attempts must be at least 1."
+        )
 
     book = args.book.resolve()
     voice_library = (
@@ -140,7 +290,10 @@ def main() -> int:
             "whisperModel":
                 args.whisper_model,
             "pauseSeconds": args.pause,
+            "maxSegmentAttempts":
+                args.max_segment_attempts,
         },
+        "segmentVerificationAttempts": [],
         "chapterDirectory":
             str(chapter_directory),
         "masteredAudioPath": None,
@@ -175,18 +328,16 @@ def main() -> int:
 
         current_stage = "segment verification"
 
-        run_stage(
-            "Segment verification",
-            [
-                sys.executable,
-                str(
-                    tools_directory /
-                    "verify_chapter_probe.py"
-                ),
-                str(chapter_manifest),
-                "--model",
-                args.whisper_model,
-            ],
+        verify_segments_with_retries(
+            tools_directory,
+            book,
+            voice_library,
+            args.chapter,
+            run_directory,
+            chapter_manifest,
+            args.whisper_model,
+            args.max_segment_attempts,
+            report["segmentVerificationAttempts"],
         )
 
         current_stage = "assembly"
