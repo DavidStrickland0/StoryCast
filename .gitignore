@@ -1,0 +1,37 @@
+﻿# Visual Studio and .NET
+.vs/
+**/bin/
+**/obj/
+TestResults/
+*.user
+*.suo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local audio source and generated media
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.aac
+*.ogg
+
+# Generated voice-library reports
+voices/voice-analysis.json
+voices/voice-verification.json
+
+# Generated audiobook artifacts
+**/output/
+**/production/runs/
+
+# Local aggregate source/context dump
+DevContext.*
+
+# Temporary files
+*.tmp
+*.log
+

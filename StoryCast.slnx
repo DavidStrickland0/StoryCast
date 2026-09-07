@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/StoryCast.Application/StoryCast.Application.csproj" />
+    <Project Path="src/StoryCast.Cli/StoryCast.Cli.csproj" />
+    <Project Path="src/StoryCast.Domain/StoryCast.Domain.csproj" />
+    <Project Path="src/StoryCast.Infrastructure/StoryCast.Infrastructure.csproj" />
+    <Project Path="src/StoryCast.Ollama/StoryCast.Ollama.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/StoryCast.Application.Tests/StoryCast.Application.Tests.csproj" />
+    <Project Path="tests/StoryCast.Domain.Tests/StoryCast.Domain.Tests.csproj" />
+    <Project Path="tests/StoryCast.Infrastructure.Tests/StoryCast.Infrastructure.Tests.csproj" />
+    <Project Path="tests/StoryCast.Ollama.Tests/StoryCast.Ollama.Tests.csproj" />
+  </Folder>
+</Solution>
