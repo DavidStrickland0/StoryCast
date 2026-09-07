@@ -336,7 +336,7 @@ static void WriteHelp()
           storycast dialogue attribute <book-directory> --model <model>
           storycast cast assign <book-directory> --model <model> [--library <path>]
           storycast produce chapter <book-directory> <chapter-id> [--library <path>] [--resume-run <path>]
-          storycast produce book <book-directory> [--library <path>] [--resume-book-run <path>]
+          storycast produce book <book-directory> [--library <path>] [--resume-book-run <path>] [--chapter-pause <seconds>]
 
         Commands:
           voices list         Validate and display available voices.
@@ -357,6 +357,7 @@ static void WriteHelp()
           --force       Reprocess unchanged chapters.
           --resume-run        Continue an incomplete chapter run.
           --resume-book-run   Continue an incomplete book run.
+          --chapter-pause     Silence between chapters. Defaults to 1.0 seconds.
           --help, -h     Display this help.
         """);
 }
