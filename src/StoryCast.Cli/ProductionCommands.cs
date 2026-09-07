@@ -42,6 +42,17 @@ internal static class ProductionCommands
                     "--whisper-model") ??
                 "small.en";
 
+            var resumeRunValue =
+                GetOptionValue(
+                    args,
+                    "--resume-run");
+
+            var resumeRunPath =
+                resumeRunValue is null
+                    ? null
+                    : Path.GetFullPath(
+                        resumeRunValue);
+
             var python =
                 GetOptionValue(args, "--python") ??
                 "/home/user/.venvs/storycast/bin/python";
@@ -76,6 +87,14 @@ internal static class ProductionCommands
                     scriptPath);
             }
 
+            if (resumeRunPath is not null &&
+                !Directory.Exists(resumeRunPath))
+            {
+                throw new DirectoryNotFoundException(
+                    $"Resume run directory was not found: " +
+                    $"{resumeRunPath}");
+            }
+
             var wslBookPath = await ConvertToWslPathAsync(
                 bookPath);
 
@@ -85,10 +104,22 @@ internal static class ProductionCommands
             var wslScriptPath = await ConvertToWslPathAsync(
                 scriptPath);
 
+            var wslResumeRunPath =
+                resumeRunPath is null
+                    ? null
+                    : await ConvertToWslPathAsync(
+                        resumeRunPath);
+
             Console.WriteLine($"Book:          {bookPath}");
             Console.WriteLine($"Chapter:       {chapterId}");
             Console.WriteLine($"Voice library: {libraryPath}");
             Console.WriteLine($"Whisper:       {whisperModel}");
+
+            if (resumeRunPath is not null)
+            {
+                Console.WriteLine(
+                    $"Resume run:    {resumeRunPath}");
+            }
             Console.WriteLine();
             Console.WriteLine("Starting chapter production...");
             Console.WriteLine();
@@ -100,7 +131,8 @@ internal static class ProductionCommands
                 wslLibraryPath,
                 chapterId,
                 whisperModel,
-                cudaLibraryPath);
+                cudaLibraryPath,
+                wslResumeRunPath);
 
             Console.WriteLine();
 
@@ -193,7 +225,8 @@ internal static class ProductionCommands
         string libraryPath,
         string chapterId,
         string whisperModel,
-        string cudaLibraryPath)
+        string cudaLibraryPath,
+        string? resumeRunPath)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -215,6 +248,14 @@ internal static class ProductionCommands
         startInfo.ArgumentList.Add(chapterId);
         startInfo.ArgumentList.Add("--whisper-model");
         startInfo.ArgumentList.Add(whisperModel);
+
+        if (resumeRunPath is not null)
+        {
+            startInfo.ArgumentList.Add(
+                "--resume-run-directory");
+            startInfo.ArgumentList.Add(
+                resumeRunPath);
+        }
 
         using var process = new Process
         {

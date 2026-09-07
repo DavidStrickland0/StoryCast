@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
         default=0.18,
     )
     parser.add_argument(
+        "--resume-run-directory",
+        type=Path,
+        default=None,
+    )
+    parser.add_argument(
         "--max-segment-attempts",
         type=int,
         default=3,
@@ -264,7 +269,25 @@ def main() -> int:
         __file__
     ).resolve().parent
 
-    run_directory = create_run_path(book)
+    is_resume = (
+        args.resume_run_directory is not None
+    )
+
+    if is_resume:
+        run_directory = (
+            args.resume_run_directory.resolve()
+        )
+
+        if not run_directory.is_dir():
+            raise FileNotFoundError(
+                f"Resume run directory was not found: "
+                f"{run_directory}"
+            )
+    else:
+        run_directory = create_run_path(
+            book
+        )
+
     chapter_directory = (
         run_directory / args.chapter
     )
@@ -273,31 +296,115 @@ def main() -> int:
         run_directory / "run.json"
     )
 
-    report = {
-        "schemaVersion": 1,
-        "runId": run_directory.name,
-        "bookPath": str(book),
-        "voiceLibraryPath":
-            str(voice_library),
-        "chapterId": args.chapter,
-        "startedUtc": datetime.now(
-            timezone.utc
-        ).isoformat(),
-        "completedUtc": None,
-        "status": "running",
-        "failedStage": None,
-        "settings": {
+    resumed_utc = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    if is_resume:
+        if not run_manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Run manifest was not found: "
+                f"{run_manifest_path}"
+            )
+
+        report = load_json(
+            run_manifest_path
+        )
+
+        if (
+            Path(report.get("bookPath", "")).resolve() !=
+                book or
+            Path(
+                report.get(
+                    "voiceLibraryPath",
+                    "",
+                )
+            ).resolve() != voice_library or
+            report.get("chapterId") != args.chapter or
+            Path(
+                report.get(
+                    "chapterDirectory",
+                    "",
+                )
+            ).resolve() != chapter_directory
+        ):
+            raise RuntimeError(
+                "Resume run identity does not match the "
+                "requested book, voice library, or chapter."
+            )
+
+        if report.get("status") == "completed":
+            raise RuntimeError(
+                "A completed production run cannot be resumed."
+            )
+
+        expected_settings = {
             "whisperModel":
                 args.whisper_model,
             "pauseSeconds": args.pause,
             "maxSegmentAttempts":
                 args.max_segment_attempts,
-        },
-        "segmentVerificationAttempts": [],
-        "chapterDirectory":
-            str(chapter_directory),
-        "masteredAudioPath": None,
-    }
+        }
+
+        if report.get("settings") != expected_settings:
+            raise RuntimeError(
+                "Resume settings do not match the original run."
+            )
+
+        report.setdefault(
+            "resumeHistory",
+            [],
+        ).append(
+            {
+                "resumedUtc": resumed_utc,
+                "previousStatus":
+                    report.get("status"),
+                "previousFailedStage":
+                    report.get("failedStage"),
+                "previousVerificationAttempts":
+                    report.get(
+                        "segmentVerificationAttempts",
+                        [],
+                    ),
+            }
+        )
+
+        report["resumeCount"] = (
+            report.get("resumeCount", 0) + 1
+        )
+        report["lastResumedUtc"] = resumed_utc
+        report["completedUtc"] = None
+        report["status"] = "running"
+        report["failedStage"] = None
+        report["segmentVerificationAttempts"] = []
+        report["masteredAudioPath"] = None
+    else:
+        report = {
+            "schemaVersion": 1,
+            "runId": run_directory.name,
+            "bookPath": str(book),
+            "voiceLibraryPath":
+                str(voice_library),
+            "chapterId": args.chapter,
+            "startedUtc": resumed_utc,
+            "completedUtc": None,
+            "status": "running",
+            "failedStage": None,
+            "settings": {
+                "whisperModel":
+                    args.whisper_model,
+                "pauseSeconds": args.pause,
+                "maxSegmentAttempts":
+                    args.max_segment_attempts,
+            },
+            "segmentVerificationAttempts": [],
+            "resumeCount": 0,
+            "resumeHistory": [],
+            "lastResumedUtc": None,
+            "chapterDirectory":
+                str(chapter_directory),
+            "masteredAudioPath": None,
+        }
 
     write_run_manifest(
         run_manifest_path,
@@ -309,21 +416,32 @@ def main() -> int:
     try:
         current_stage = "synthesis"
 
+        synthesis_arguments = [
+            sys.executable,
+            str(
+                tools_directory /
+                "synthesize_chapter_probe.py"
+            ),
+            str(book),
+            str(voice_library),
+            "--chapter",
+            args.chapter,
+            "--run-directory",
+            str(run_directory),
+        ]
+
+        if is_resume:
+            synthesis_arguments.append(
+                "--resume"
+            )
+
         run_stage(
-            "Synthesis",
-            [
-                sys.executable,
-                str(
-                    tools_directory /
-                    "synthesize_chapter_probe.py"
-                ),
-                str(book),
-                str(voice_library),
-                "--chapter",
-                args.chapter,
-                "--run-directory",
-                str(run_directory),
-            ],
+            (
+                "Resume synthesis"
+                if is_resume
+                else "Synthesis"
+            ),
+            synthesis_arguments,
         )
 
         chapter_manifest = (

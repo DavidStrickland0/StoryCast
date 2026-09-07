@@ -327,7 +327,7 @@ static void WriteHelp()
           storycast characters discover <book-directory> --model <model>
           storycast dialogue attribute <book-directory> --model <model>
           storycast cast assign <book-directory> --model <model> [--library <path>]
-          storycast produce chapter <book-directory> <chapter-id> [--library <path>]
+          storycast produce chapter <book-directory> <chapter-id> [--library <path>] [--resume-run <path>]
 
         Commands:
           voices list         Validate and display available voices.
@@ -345,6 +345,7 @@ static void WriteHelp()
           --model        Installed Ollama model used for analysis.
           --ollama-url   Ollama URL. Defaults to http://localhost:11434/.
           --force       Reprocess unchanged chapters.
+          --resume-run   Continue an incomplete production run.
           --help, -h     Display this help.
         """);
 }

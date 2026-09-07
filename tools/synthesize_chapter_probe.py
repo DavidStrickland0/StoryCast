@@ -272,36 +272,39 @@ def main() -> int:
         "segments": [],
     }
 
-    if is_retry or is_resume:
+    if is_retry:
         if not manifest_path.is_file():
             raise FileNotFoundError(
                 f"Existing chapter checkpoint was not found: "
                 f"{manifest_path}"
             )
 
-        existing_manifest = load_json(
+        manifest = load_json(
             manifest_path
         )
+    elif is_resume and manifest_path.is_file():
+        manifest = load_json(
+            manifest_path
+        )
+    else:
+        write_json_atomic(
+            manifest_path,
+            manifest,
+        )
 
+    if is_retry or is_resume:
         if (
-            existing_manifest.get("chapterId") !=
+            manifest.get("chapterId") !=
                 args.chapter or
-            existing_manifest.get("sourceSha256") !=
+            manifest.get("sourceSha256") !=
                 artifact["sourceSha256"] or
-            existing_manifest.get("preparationVersion") !=
+            manifest.get("preparationVersion") !=
                 artifact["preparationVersion"]
         ):
             raise RuntimeError(
                 "Existing chapter checkpoint does not match "
                 "the current production script."
             )
-
-        manifest = existing_manifest
-    else:
-        write_json_atomic(
-            manifest_path,
-            manifest,
-        )
 
     reused_segments = 0
 
