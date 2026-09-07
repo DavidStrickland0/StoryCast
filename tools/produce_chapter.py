@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -93,6 +94,72 @@ def load_json(path: Path) -> dict:
         encoding="utf-8-sig",
     ) as stream:
         return json.load(stream)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+
+    with path.open("rb") as stream:
+        for block in iter(
+            lambda: stream.read(1024 * 1024),
+            b"",
+        ):
+            digest.update(block)
+
+    return digest.hexdigest()
+
+
+def describe_files(
+    paths: list[Path],
+) -> list[dict]:
+    return [
+        {
+            "path": str(path.resolve()),
+            "sha256": sha256_file(
+                path.resolve()
+            ),
+        }
+        for path in paths
+    ]
+
+
+def create_stage_checkpoint(
+    input_paths: list[Path],
+    settings: dict,
+    output_paths: list[Path],
+) -> dict:
+    return {
+        "completedUtc": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "inputs": describe_files(input_paths),
+        "settings": settings,
+        "outputs": describe_files(output_paths),
+    }
+
+
+def stage_checkpoint_is_reusable(
+    checkpoint: dict | None,
+    input_paths: list[Path],
+    settings: dict,
+    output_paths: list[Path],
+) -> bool:
+    if checkpoint is None:
+        return False
+
+    if checkpoint.get("settings") != settings:
+        return False
+
+    try:
+        inputs = describe_files(input_paths)
+        outputs = describe_files(output_paths)
+    except (FileNotFoundError, OSError):
+        return False
+
+    return (
+        checkpoint.get("inputs") == inputs and
+        checkpoint.get("outputs") == outputs
+    )
 
 
 def write_run_manifest(
@@ -252,6 +319,63 @@ def verify_segments_with_retries(
             synthesis_arguments,
         )
 
+def segment_audio_paths(
+    chapter_manifest: Path,
+) -> list[Path]:
+    manifest = load_json(chapter_manifest)
+
+    return [
+        Path(segment["audioPath"]).resolve()
+        for segment in manifest["segments"]
+    ]
+
+
+def run_checkpointed_stage(
+    name: str,
+    checkpoint_name: str,
+    report: dict,
+    run_manifest_path: Path,
+    input_paths: list[Path],
+    settings: dict,
+    output_paths: list[Path],
+    action,
+) -> bool:
+    checkpoints = report.setdefault(
+        "stageCheckpoints",
+        {},
+    )
+
+    if stage_checkpoint_is_reusable(
+        checkpoints.get(checkpoint_name),
+        input_paths,
+        settings,
+        output_paths,
+    ):
+        print()
+        print(
+            f"===== {name} (reused) =====",
+            flush=True,
+        )
+        return False
+
+    action()
+
+    checkpoints[checkpoint_name] = (
+        create_stage_checkpoint(
+            input_paths,
+            settings,
+            output_paths,
+        )
+    )
+
+    write_run_manifest(
+        run_manifest_path,
+        report,
+    )
+
+    return True
+
+
 def main() -> int:
     args = parse_args()
 
@@ -378,6 +502,10 @@ def main() -> int:
         report["failedStage"] = None
         report["segmentVerificationAttempts"] = []
         report["masteredAudioPath"] = None
+        report.setdefault(
+            "stageCheckpoints",
+            {},
+        )
     else:
         report = {
             "schemaVersion": 1,
@@ -398,6 +526,7 @@ def main() -> int:
                     args.max_segment_attempts,
             },
             "segmentVerificationAttempts": [],
+            "stageCheckpoints": {},
             "resumeCount": 0,
             "resumeHistory": [],
             "lastResumedUtc": None,
@@ -449,34 +578,53 @@ def main() -> int:
             "chapter.json"
         )
 
-        current_stage = "segment verification"
-
-        verify_segments_with_retries(
-            tools_directory,
-            book,
-            voice_library,
-            args.chapter,
-            run_directory,
-            chapter_manifest,
-            args.whisper_model,
-            args.max_segment_attempts,
-            report["segmentVerificationAttempts"],
+        verification_path = (
+            chapter_directory /
+            "verification.json"
         )
 
-        current_stage = "assembly"
+        segment_inputs = [
+            chapter_manifest,
+            tools_directory /
+            "verify_chapter_probe.py",
+            *segment_audio_paths(
+                chapter_manifest
+            ),
+        ]
 
-        run_stage(
-            "Assembly",
-            [
-                sys.executable,
-                str(
-                    tools_directory /
-                    "assemble_chapter_probe.py"
-                ),
-                str(chapter_manifest),
-                "--pause",
-                str(args.pause),
-            ],
+        current_stage = "segment verification"
+
+        run_checkpointed_stage(
+            "Segment verification",
+            "segmentVerification",
+            report,
+            run_manifest_path,
+            segment_inputs,
+            {
+                "whisperModel":
+                    args.whisper_model,
+                "maxSegmentAttempts":
+                    args.max_segment_attempts,
+            },
+            [verification_path],
+            lambda: verify_segments_with_retries(
+                tools_directory,
+                book,
+                voice_library,
+                args.chapter,
+                run_directory,
+                chapter_manifest,
+                args.whisper_model,
+                args.max_segment_attempts,
+                report[
+                    "segmentVerificationAttempts"
+                ],
+            ),
+        )
+
+        raw_chapter_audio = (
+            chapter_directory /
+            f"{args.chapter}.wav"
         )
 
         assembly_manifest = (
@@ -484,34 +632,81 @@ def main() -> int:
             "assembly.json"
         )
 
-        current_stage = "assembly verification"
+        assembly_inputs = [
+            chapter_manifest,
+            tools_directory /
+            "assemble_chapter_probe.py",
+            *segment_audio_paths(
+                chapter_manifest
+            ),
+        ]
 
-        run_stage(
-            "Assembly verification",
+        current_stage = "assembly"
+
+        run_checkpointed_stage(
+            "Assembly",
+            "assembly",
+            report,
+            run_manifest_path,
+            assembly_inputs,
+            {
+                "pauseSeconds": args.pause,
+            },
             [
-                sys.executable,
-                str(
-                    tools_directory /
-                    "verify_assembly_probe.py"
-                ),
-                str(assembly_manifest),
-                "--model",
-                args.whisper_model,
+                assembly_manifest,
+                raw_chapter_audio,
             ],
+            lambda: run_stage(
+                "Assembly",
+                [
+                    sys.executable,
+                    str(
+                        tools_directory /
+                        "assemble_chapter_probe.py"
+                    ),
+                    str(chapter_manifest),
+                    "--pause",
+                    str(args.pause),
+                ],
+            ),
         )
 
-        current_stage = "mastering"
+        assembly_verification_path = (
+            chapter_directory /
+            "assembly-verification.json"
+        )
 
-        run_stage(
-            "Mastering",
+        current_stage = "assembly verification"
+
+        run_checkpointed_stage(
+            "Assembly verification",
+            "assemblyVerification",
+            report,
+            run_manifest_path,
             [
-                sys.executable,
-                str(
-                    tools_directory /
-                    "master_chapter_probe.py"
-                ),
-                str(assembly_manifest),
+                assembly_manifest,
+                raw_chapter_audio,
+                tools_directory /
+                "verify_assembly_probe.py",
             ],
+            {
+                "whisperModel":
+                    args.whisper_model,
+            },
+            [assembly_verification_path],
+            lambda: run_stage(
+                "Assembly verification",
+                [
+                    sys.executable,
+                    str(
+                        tools_directory /
+                        "verify_assembly_probe.py"
+                    ),
+                    str(assembly_manifest),
+                    "--model",
+                    args.whisper_model,
+                ],
+            ),
         )
 
         mastered_audio = (
@@ -519,26 +714,83 @@ def main() -> int:
             f"{args.chapter}.mastered.wav"
         )
 
-        current_stage = "mastered verification"
-
-        run_stage(
-            "Mastered verification",
-            [
-                sys.executable,
-                str(
-                    tools_directory /
-                    "verify_assembly_probe.py"
-                ),
-                str(assembly_manifest),
-                "--audio",
-                str(mastered_audio),
-                "--report-name",
-                "mastered-verification.json",
-                "--model",
-                args.whisper_model,
-            ],
+        mastering_report_path = (
+            chapter_directory /
+            "mastering.json"
         )
 
+        current_stage = "mastering"
+
+        run_checkpointed_stage(
+            "Mastering",
+            "mastering",
+            report,
+            run_manifest_path,
+            [
+                assembly_manifest,
+                raw_chapter_audio,
+                tools_directory /
+                "master_chapter_probe.py",
+            ],
+            {},
+            [
+                mastering_report_path,
+                mastered_audio,
+            ],
+            lambda: run_stage(
+                "Mastering",
+                [
+                    sys.executable,
+                    str(
+                        tools_directory /
+                        "master_chapter_probe.py"
+                    ),
+                    str(assembly_manifest),
+                ],
+            ),
+        )
+
+        mastered_verification_path = (
+            chapter_directory /
+            "mastered-verification.json"
+        )
+
+        current_stage = "mastered verification"
+
+        run_checkpointed_stage(
+            "Mastered verification",
+            "masteredVerification",
+            report,
+            run_manifest_path,
+            [
+                assembly_manifest,
+                mastered_audio,
+                tools_directory /
+                "verify_assembly_probe.py",
+            ],
+            {
+                "whisperModel":
+                    args.whisper_model,
+            },
+            [mastered_verification_path],
+            lambda: run_stage(
+                "Mastered verification",
+                [
+                    sys.executable,
+                    str(
+                        tools_directory /
+                        "verify_assembly_probe.py"
+                    ),
+                    str(assembly_manifest),
+                    "--audio",
+                    str(mastered_audio),
+                    "--report-name",
+                    "mastered-verification.json",
+                    "--model",
+                    args.whisper_model,
+                ],
+            ),
+        )
         report["status"] = "completed"
         report["completedUtc"] = (
             datetime.now(
