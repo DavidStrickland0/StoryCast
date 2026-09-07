@@ -65,6 +65,14 @@ static async Task<int> RunAsync(string[] args)
     }
     if (args.Length >= 2 &&
         EqualsArgument(args[0], "produce") &&
+        EqualsArgument(args[1], "book"))
+    {
+        return await BookProductionCommands.ProduceBookAsync(
+            args[2..]);
+    }
+
+    if (args.Length >= 2 &&
+        EqualsArgument(args[0], "produce") &&
         EqualsArgument(args[1], "chapter"))
     {
         return await ProductionCommands.ProduceChapterAsync(
@@ -328,6 +336,7 @@ static void WriteHelp()
           storycast dialogue attribute <book-directory> --model <model>
           storycast cast assign <book-directory> --model <model> [--library <path>]
           storycast produce chapter <book-directory> <chapter-id> [--library <path>] [--resume-run <path>]
+          storycast produce book <book-directory> [--library <path>]
 
         Commands:
           voices list         Validate and display available voices.
@@ -339,6 +348,7 @@ static void WriteHelp()
           dialogue attribute    Assign every dialogue line to a character.
           cast assign         Assign verified voices to audiobook roles.
           produce chapter     Synthesize, verify, assemble, and master a chapter.
+          produce book        Produce every configured chapter in order.
 
         Options:
           --library      Voice-library directory. Defaults to .\voices.

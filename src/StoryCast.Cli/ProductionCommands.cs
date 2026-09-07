@@ -2,6 +2,13 @@ using System.Diagnostics;
 
 internal static class ProductionCommands
 {
+    /// <summary>
+    /// Produces, verifies, assembles, and masters one chapter.
+    /// </summary>
+    /// <param name="args">The chapter-production arguments.</param>
+    /// <returns>
+    /// A task containing zero on success; otherwise, a nonzero exit code.
+    /// </returns>
     public static async Task<int> ProduceChapterAsync(
         string[] args)
     {
@@ -42,6 +49,17 @@ internal static class ProductionCommands
                     "--whisper-model") ??
                 "small.en";
 
+            var runDirectoryValue =
+                GetOptionValue(
+                    args,
+                    "--run-directory");
+
+            var runDirectoryPath =
+                runDirectoryValue is null
+                    ? null
+                    : Path.GetFullPath(
+                        runDirectoryValue);
+
             var resumeRunValue =
                 GetOptionValue(
                     args,
@@ -52,6 +70,14 @@ internal static class ProductionCommands
                     ? null
                     : Path.GetFullPath(
                         resumeRunValue);
+
+            if (runDirectoryPath is not null &&
+                resumeRunPath is not null)
+            {
+                throw new ArgumentException(
+                    "--run-directory and --resume-run cannot " +
+                    "be used together.");
+            }
 
             var python =
                 GetOptionValue(args, "--python") ??
@@ -87,6 +113,14 @@ internal static class ProductionCommands
                     scriptPath);
             }
 
+            if (runDirectoryPath is not null &&
+                Directory.Exists(runDirectoryPath))
+            {
+                throw new IOException(
+                    $"New run directory already exists: " +
+                    $"{runDirectoryPath}");
+            }
+
             if (resumeRunPath is not null &&
                 !Directory.Exists(resumeRunPath))
             {
@@ -104,6 +138,12 @@ internal static class ProductionCommands
             var wslScriptPath = await ConvertToWslPathAsync(
                 scriptPath);
 
+            var wslRunDirectoryPath =
+                runDirectoryPath is null
+                    ? null
+                    : await ConvertToWslPathAsync(
+                        runDirectoryPath);
+
             var wslResumeRunPath =
                 resumeRunPath is null
                     ? null
@@ -114,6 +154,12 @@ internal static class ProductionCommands
             Console.WriteLine($"Chapter:       {chapterId}");
             Console.WriteLine($"Voice library: {libraryPath}");
             Console.WriteLine($"Whisper:       {whisperModel}");
+
+            if (runDirectoryPath is not null)
+            {
+                Console.WriteLine(
+                    $"Run directory: {runDirectoryPath}");
+            }
 
             if (resumeRunPath is not null)
             {
@@ -132,6 +178,7 @@ internal static class ProductionCommands
                 chapterId,
                 whisperModel,
                 cudaLibraryPath,
+                wslRunDirectoryPath,
                 wslResumeRunPath);
 
             Console.WriteLine();
@@ -226,6 +273,7 @@ internal static class ProductionCommands
         string chapterId,
         string whisperModel,
         string cudaLibraryPath,
+        string? runDirectoryPath,
         string? resumeRunPath)
     {
         var startInfo = new ProcessStartInfo
@@ -248,6 +296,14 @@ internal static class ProductionCommands
         startInfo.ArgumentList.Add(chapterId);
         startInfo.ArgumentList.Add("--whisper-model");
         startInfo.ArgumentList.Add(whisperModel);
+
+        if (runDirectoryPath is not null)
+        {
+            startInfo.ArgumentList.Add(
+                "--run-directory");
+            startInfo.ArgumentList.Add(
+                runDirectoryPath);
+        }
 
         if (resumeRunPath is not null)
         {
