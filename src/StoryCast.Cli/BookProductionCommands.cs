@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using StoryCast.Infrastructure.Books;
@@ -106,20 +105,11 @@ internal static class BookProductionCommands
                     : Path.GetFullPath(
                         resumeRunValue);
 
-            var python =
-                GetOptionValue(args, "--python") ??
-                "/home/user/.venvs/storycast/bin/python";
-
-            var cudaLibraryPath =
+            var workerImage =
                 GetOptionValue(
                     args,
-                    "--cuda-library-path") ??
-                string.Join(
-                    ':',
-                    "/home/user/.venvs/storycast/lib/python3.12/" +
-                    "site-packages/nvidia/cublas/lib",
-                    "/home/user/.venvs/storycast/lib/python3.12/" +
-                    "site-packages/nvidia/cudnn/lib");
+                    "--worker-image") ??
+                "storycast-worker:dev";
 
             if (!Directory.Exists(bookPath))
             {
@@ -434,10 +424,8 @@ internal static class BookProductionCommands
                     scriptPath,
                     "--whisper-model",
                     whisperModel,
-                    "--python",
-                    python,
-                    "--cuda-library-path",
-                    cudaLibraryPath
+                    "--worker-image",
+                    workerImage
                 };
 
                 if (hasChapterRun)
@@ -527,13 +515,14 @@ internal static class BookProductionCommands
                 runDirectory,
                 "book-assembly-request.json");
 
-            var wslRunDirectory =
-                await ConvertToWslPathAsync(
-                    runDirectory);
+            var runtime = new DockerWorkerRuntime(
+                book.RootPath,
+                libraryPath,
+                workerImage);
 
-            var wslAssemblyScript =
-                await ConvertToWslPathAsync(
-                    assemblyScriptPath);
+            var containerRunDirectory =
+                runtime.GetBookPath(
+                    runDirectory);
 
             var assemblyChapters =
                 new List<BookAssemblyChapterRequest>();
@@ -554,7 +543,7 @@ internal static class BookProductionCommands
                         Index = chapter.Index,
                         ChapterId = chapter.ChapterId,
                         AudioPath =
-                            await ConvertToWslPathAsync(
+                            runtime.GetBookPath(
                                 chapter.MasteredAudioPath)
                     });
             }
@@ -566,7 +555,7 @@ internal static class BookProductionCommands
                     BookId = manifest.BookId,
                     Title = manifest.Title,
                     Author = manifest.Author,
-                    RunDirectory = wslRunDirectory,
+                    RunDirectory = containerRunDirectory,
                     ChapterPauseSeconds =
                         manifest.Settings.ChapterPauseSeconds,
                     Chapters = assemblyChapters
@@ -576,15 +565,16 @@ internal static class BookProductionCommands
                 assemblyRequestPath,
                 assemblyRequest);
 
-            var wslAssemblyRequest =
-                await ConvertToWslPathAsync(
+            var containerAssemblyRequest =
+                runtime.GetBookPath(
                     assemblyRequestPath);
 
             var assemblyExitCode =
                 await RunAssemblyWorkerAsync(
-                    python,
-                    wslAssemblyScript,
-                    wslAssemblyRequest);
+                    runtime,
+                    Path.GetFileName(
+                        assemblyScriptPath),
+                    containerAssemblyRequest);
 
             if (assemblyExitCode != 0)
             {
@@ -623,21 +613,17 @@ internal static class BookProductionCommands
                 manifestPath,
                 manifest);
 
-            var wslVerificationScript =
-                await ConvertToWslPathAsync(
-                    verificationScriptPath);
-
-            var wslAssemblyManifest =
-                await ConvertToWslPathAsync(
+            var containerAssemblyManifest =
+                runtime.GetBookPath(
                     assemblyManifestPath);
 
             var verificationExitCode =
                 await RunBookVerificationWorkerAsync(
-                    python,
-                    wslVerificationScript,
-                    wslAssemblyManifest,
-                    whisperModel,
-                    cudaLibraryPath);
+                    runtime,
+                    Path.GetFileName(
+                        verificationScriptPath),
+                    containerAssemblyManifest,
+                    whisperModel);
 
             if (verificationExitCode != 0)
             {
@@ -748,131 +734,31 @@ internal static class BookProductionCommands
             overwrite: true);
     }
 
-    private static async Task<int> RunAssemblyWorkerAsync(
-        string python,
-        string scriptPath,
+    private static Task<int> RunAssemblyWorkerAsync(
+        DockerWorkerRuntime runtime,
+        string scriptName,
         string requestPath)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "wsl.exe",
-            UseShellExecute = false
-        };
-
-        startInfo.ArgumentList.Add("--exec");
-        startInfo.ArgumentList.Add(python);
-        startInfo.ArgumentList.Add(scriptPath);
-        startInfo.ArgumentList.Add(requestPath);
-
-        using var process = new Process
-        {
-            StartInfo = startInfo
-        };
-
-        if (!process.Start())
-        {
-            throw new InvalidOperationException(
-                "Unable to start the WSL book assembly worker.");
-        }
-
-        await process.WaitForExitAsync();
-
-        return process.ExitCode;
+        return runtime.RunAsync(
+            scriptName,
+            [requestPath],
+            useGpu: false);
     }
 
-    private static async Task<int>
-        RunBookVerificationWorkerAsync(
-            string python,
-            string scriptPath,
-            string assemblyManifestPath,
-            string whisperModel,
-            string cudaLibraryPath)
+    private static Task<int> RunBookVerificationWorkerAsync(
+        DockerWorkerRuntime runtime,
+        string scriptName,
+        string assemblyManifestPath,
+        string whisperModel)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "wsl.exe",
-            UseShellExecute = false
-        };
-
-        startInfo.ArgumentList.Add("--exec");
-        startInfo.ArgumentList.Add("env");
-        startInfo.ArgumentList.Add(
-            $"LD_LIBRARY_PATH={cudaLibraryPath}");
-        startInfo.ArgumentList.Add(
-            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True");
-        startInfo.ArgumentList.Add(python);
-        startInfo.ArgumentList.Add(scriptPath);
-        startInfo.ArgumentList.Add(assemblyManifestPath);
-        startInfo.ArgumentList.Add("--model");
-        startInfo.ArgumentList.Add(whisperModel);
-
-        using var process = new Process
-        {
-            StartInfo = startInfo
-        };
-
-        if (!process.Start())
-        {
-            throw new InvalidOperationException(
-                "Unable to start the WSL book verification worker.");
-        }
-
-        await process.WaitForExitAsync();
-
-        return process.ExitCode;
+        return runtime.RunAsync(
+            scriptName,
+            [
+                assemblyManifestPath,
+                "--model",
+                whisperModel
+            ]);
     }
-
-    private static async Task<string> ConvertToWslPathAsync(
-        string windowsPath)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "wsl.exe",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        startInfo.ArgumentList.Add("--exec");
-        startInfo.ArgumentList.Add("wslpath");
-        startInfo.ArgumentList.Add("-a");
-        startInfo.ArgumentList.Add("-u");
-        startInfo.ArgumentList.Add(windowsPath);
-
-        using var process = new Process
-        {
-            StartInfo = startInfo
-        };
-
-        if (!process.Start())
-        {
-            throw new InvalidOperationException(
-                "Unable to start WSL.");
-        }
-
-        var outputTask =
-            process.StandardOutput.ReadToEndAsync();
-
-        var errorTask =
-            process.StandardError.ReadToEndAsync();
-
-        await process.WaitForExitAsync();
-
-        var output = (await outputTask).Trim();
-        var error = (await errorTask).Trim();
-
-        if (process.ExitCode != 0 ||
-            string.IsNullOrWhiteSpace(output))
-        {
-            throw new InvalidOperationException(
-                $"Unable to convert Windows path for WSL: " +
-                $"{windowsPath}. {error}");
-        }
-
-        return output;
-    }
-
     private static async Task<BookRunManifest>
         LoadBookRunAsync(
             string path)

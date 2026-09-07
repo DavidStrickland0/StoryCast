@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 internal static class ProductionCommands
 {
     /// <summary>
@@ -79,20 +77,11 @@ internal static class ProductionCommands
                     "be used together.");
             }
 
-            var python =
-                GetOptionValue(args, "--python") ??
-                "/home/user/.venvs/storycast/bin/python";
-
-            var cudaLibraryPath =
+            var workerImage =
                 GetOptionValue(
                     args,
-                    "--cuda-library-path") ??
-                string.Join(
-                    ':',
-                    "/home/user/.venvs/storycast/lib/python3.12/" +
-                    "site-packages/nvidia/cublas/lib",
-                    "/home/user/.venvs/storycast/lib/python3.12/" +
-                    "site-packages/nvidia/cudnn/lib");
+                    "--worker-image") ??
+                "storycast-worker:dev";
 
             if (!Directory.Exists(bookPath))
             {
@@ -129,25 +118,24 @@ internal static class ProductionCommands
                     $"{resumeRunPath}");
             }
 
-            var wslBookPath = await ConvertToWslPathAsync(
-                bookPath);
+            var runtime = new DockerWorkerRuntime(
+                bookPath,
+                libraryPath,
+                workerImage);
 
-            var wslLibraryPath = await ConvertToWslPathAsync(
-                libraryPath);
+            var containerBookPath =
+                runtime.GetBookPath();
 
-            var wslScriptPath = await ConvertToWslPathAsync(
-                scriptPath);
-
-            var wslRunDirectoryPath =
+            var containerRunDirectoryPath =
                 runDirectoryPath is null
                     ? null
-                    : await ConvertToWslPathAsync(
+                    : runtime.GetBookPath(
                         runDirectoryPath);
 
-            var wslResumeRunPath =
+            var containerResumeRunPath =
                 resumeRunPath is null
                     ? null
-                    : await ConvertToWslPathAsync(
+                    : runtime.GetBookPath(
                         resumeRunPath);
 
             Console.WriteLine($"Book:          {bookPath}");
@@ -171,15 +159,14 @@ internal static class ProductionCommands
             Console.WriteLine();
 
             var exitCode = await RunWorkerAsync(
-                python,
-                wslScriptPath,
-                wslBookPath,
-                wslLibraryPath,
+                runtime,
+                Path.GetFileName(scriptPath),
+                containerBookPath,
+                runtime.LibraryPath,
                 chapterId,
                 whisperModel,
-                cudaLibraryPath,
-                wslRunDirectoryPath,
-                wslResumeRunPath);
+                containerRunDirectoryPath,
+                containerResumeRunPath);
 
             Console.WriteLine();
 
@@ -214,121 +201,42 @@ internal static class ProductionCommands
         }
     }
 
-    private static async Task<string> ConvertToWslPathAsync(
-        string windowsPath)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "wsl.exe",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        startInfo.ArgumentList.Add("--exec");
-        startInfo.ArgumentList.Add("wslpath");
-        startInfo.ArgumentList.Add("-a");
-        startInfo.ArgumentList.Add("-u");
-        startInfo.ArgumentList.Add(windowsPath);
-
-        using var process = new Process
-        {
-            StartInfo = startInfo
-        };
-
-        if (!process.Start())
-        {
-            throw new InvalidOperationException(
-                "Unable to start WSL.");
-        }
-
-        var outputTask =
-            process.StandardOutput.ReadToEndAsync();
-
-        var errorTask =
-            process.StandardError.ReadToEndAsync();
-
-        await process.WaitForExitAsync();
-
-        var output = (await outputTask).Trim();
-        var error = (await errorTask).Trim();
-
-        if (process.ExitCode != 0 ||
-            string.IsNullOrWhiteSpace(output))
-        {
-            throw new InvalidOperationException(
-                $"Unable to convert Windows path for WSL: " +
-                $"{windowsPath}. {error}");
-        }
-
-        return output;
-    }
-
-    private static async Task<int> RunWorkerAsync(
-        string python,
-        string scriptPath,
+    private static Task<int> RunWorkerAsync(
+        DockerWorkerRuntime runtime,
+        string scriptName,
         string bookPath,
         string libraryPath,
         string chapterId,
         string whisperModel,
-        string cudaLibraryPath,
         string? runDirectoryPath,
         string? resumeRunPath)
     {
-        var startInfo = new ProcessStartInfo
+        var arguments = new List<string>
         {
-            FileName = "wsl.exe",
-            UseShellExecute = false
+            bookPath,
+            libraryPath,
+            "--chapter",
+            chapterId,
+            "--whisper-model",
+            whisperModel
         };
-
-        startInfo.ArgumentList.Add("--exec");
-        startInfo.ArgumentList.Add("env");
-        startInfo.ArgumentList.Add(
-            $"LD_LIBRARY_PATH={cudaLibraryPath}");
-        startInfo.ArgumentList.Add(
-            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True");
-        startInfo.ArgumentList.Add(python);
-        startInfo.ArgumentList.Add(scriptPath);
-        startInfo.ArgumentList.Add(bookPath);
-        startInfo.ArgumentList.Add(libraryPath);
-        startInfo.ArgumentList.Add("--chapter");
-        startInfo.ArgumentList.Add(chapterId);
-        startInfo.ArgumentList.Add("--whisper-model");
-        startInfo.ArgumentList.Add(whisperModel);
 
         if (runDirectoryPath is not null)
         {
-            startInfo.ArgumentList.Add(
-                "--run-directory");
-            startInfo.ArgumentList.Add(
-                runDirectoryPath);
+            arguments.Add("--run-directory");
+            arguments.Add(runDirectoryPath);
         }
 
         if (resumeRunPath is not null)
         {
-            startInfo.ArgumentList.Add(
-                "--resume-run-directory");
-            startInfo.ArgumentList.Add(
-                resumeRunPath);
+            arguments.Add("--resume-run-directory");
+            arguments.Add(resumeRunPath);
         }
 
-        using var process = new Process
-        {
-            StartInfo = startInfo
-        };
-
-        if (!process.Start())
-        {
-            throw new InvalidOperationException(
-                "Unable to start the WSL production worker.");
-        }
-
-        await process.WaitForExitAsync();
-
-        return process.ExitCode;
+        return runtime.RunAsync(
+            scriptName,
+            arguments);
     }
-
     private static string? GetOptionValue(
         IReadOnlyList<string> args,
         string option)

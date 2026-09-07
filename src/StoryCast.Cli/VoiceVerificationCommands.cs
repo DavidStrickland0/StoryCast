@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 internal static class VoiceVerificationCommands
 {
     public static async Task<int> VerifyAsync(string[] args)
@@ -23,20 +21,11 @@ internal static class VoiceVerificationCommands
                 GetOptionValue(args, "--model") ??
                 "small.en";
 
-            var python =
-                GetOptionValue(args, "--python") ??
-                "/home/user/.venvs/storycast/bin/python";
-
-            var cudaLibraryPath =
+            var workerImage =
                 GetOptionValue(
                     args,
-                    "--cuda-library-path") ??
-                string.Join(
-                    ':',
-                    "/home/user/.venvs/storycast/lib/python3.12/" +
-                    "site-packages/nvidia/cublas/lib",
-                    "/home/user/.venvs/storycast/lib/python3.12/" +
-                    "site-packages/nvidia/cudnn/lib");
+                    "--worker-image") ??
+                "storycast-worker:dev";
 
             if (!Directory.Exists(libraryPath))
             {
@@ -51,23 +40,22 @@ internal static class VoiceVerificationCommands
                     scriptPath);
             }
 
-            var wslLibraryPath = await ConvertToWslPathAsync(
-                libraryPath);
-
-            var wslScriptPath = await ConvertToWslPathAsync(
-                scriptPath);
+            var runtime = new DockerWorkerRuntime(
+                null,
+                libraryPath,
+                workerImage,
+                libraryReadOnly: false);
 
             Console.WriteLine($"Voice library: {libraryPath}");
             Console.WriteLine($"Model:         {model}");
-            Console.WriteLine("Starting WSL voice verification...");
+            Console.WriteLine(
+                "Starting Docker voice verification...");
             Console.WriteLine();
 
             var exitCode = await RunVerifierAsync(
-                python,
-                wslScriptPath,
-                wslLibraryPath,
-                model,
-                cudaLibraryPath);
+                runtime,
+                Path.GetFileName(scriptPath),
+                model);
 
             Console.WriteLine();
 
@@ -102,94 +90,18 @@ internal static class VoiceVerificationCommands
         }
     }
 
-    private static async Task<string> ConvertToWslPathAsync(
-        string windowsPath)
+    private static Task<int> RunVerifierAsync(
+        DockerWorkerRuntime runtime,
+        string scriptName,
+        string model)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "wsl.exe",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        startInfo.ArgumentList.Add("--exec");
-        startInfo.ArgumentList.Add("wslpath");
-        startInfo.ArgumentList.Add("-a");
-        startInfo.ArgumentList.Add("-u");
-        startInfo.ArgumentList.Add(windowsPath);
-
-        using var process = new Process
-        {
-            StartInfo = startInfo
-        };
-
-        if (!process.Start())
-        {
-            throw new InvalidOperationException(
-                "Unable to start WSL.");
-        }
-
-        var outputTask =
-            process.StandardOutput.ReadToEndAsync();
-
-        var errorTask =
-            process.StandardError.ReadToEndAsync();
-
-        await process.WaitForExitAsync();
-
-        var output = (await outputTask).Trim();
-        var error = (await errorTask).Trim();
-
-        if (process.ExitCode != 0 ||
-            string.IsNullOrWhiteSpace(output))
-        {
-            throw new InvalidOperationException(
-                $"Unable to convert Windows path for WSL: " +
-                $"{windowsPath}. {error}");
-        }
-
-        return output;
-    }
-
-    private static async Task<int> RunVerifierAsync(
-        string python,
-        string scriptPath,
-        string libraryPath,
-        string model,
-        string cudaLibraryPath)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "wsl.exe",
-            UseShellExecute = false
-        };
-
-        startInfo.ArgumentList.Add("--exec");
-        startInfo.ArgumentList.Add("env");
-        startInfo.ArgumentList.Add(
-            $"LD_LIBRARY_PATH={cudaLibraryPath}");
-        startInfo.ArgumentList.Add(python);
-        startInfo.ArgumentList.Add(scriptPath);
-        startInfo.ArgumentList.Add(libraryPath);
-        startInfo.ArgumentList.Add("--model");
-        startInfo.ArgumentList.Add(model);
-
-        using var process = new Process
-        {
-            StartInfo = startInfo
-        };
-
-        if (!process.Start())
-        {
-            throw new InvalidOperationException(
-                "Unable to start the WSL voice verifier.");
-        }
-
-        await process.WaitForExitAsync();
-
-        return process.ExitCode;
+        return runtime.RunAsync(
+            scriptName,
+            [
+                runtime.LibraryPath,
+                "--model",
+                model
+            ]);
     }
 
     private static string? GetOptionValue(
