@@ -91,6 +91,74 @@ public sealed class CharacterDiscoveryWorkflowTests
         Assert.Equal(1, store.SaveCount);
     }
 
+    /// <summary>
+    /// Verifies that chapter progress reports skipped and processed work.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_ReportsChapterProgress()
+    {
+        var book = CreateBook();
+        var preparer = new ChapterTextPreparer();
+
+        var firstPrepared = preparer.Prepare(
+            book.Manuscript.Chapters[0]);
+
+        var store = new MemoryCharacterRegistryStore
+        {
+            Registry = new CharacterRegistry
+            {
+                SchemaVersion = 1,
+                BookId = book.Id,
+                Characters =
+                [
+                    CreateCharacter(
+                        "marcia-miller",
+                        "Marcia Miller")
+                ],
+                ProcessedChapterHashes =
+                    new Dictionary<string, string>
+                    {
+                        [firstPrepared.ChapterId] =
+                            firstPrepared.SourceSha256
+                    }
+            }
+        };
+
+        var progress = new RecordingProgress();
+
+        var workflow = new CharacterDiscoveryWorkflow(
+            preparer,
+            new StubCharacterDiscoveryService(),
+            new CharacterRegistryMerger(),
+            store);
+
+        await workflow.ExecuteAsync(
+            book,
+            progress: progress);
+
+        Assert.Collection(
+            progress.Events,
+            skipped =>
+            {
+                Assert.Equal("chapter-001", skipped.ChapterId);
+                Assert.Equal("skipped", skipped.Status);
+                Assert.Equal(0, skipped.ChapterIndex);
+                Assert.Equal(2, skipped.ChapterCount);
+            },
+            starting =>
+            {
+                Assert.Equal("chapter-002", starting.ChapterId);
+                Assert.Equal("starting", starting.Status);
+            },
+            completed =>
+            {
+                Assert.Equal("chapter-002", completed.ChapterId);
+                Assert.Equal("completed", completed.Status);
+                Assert.Equal(1, completed.DiscoveredCharacters);
+                Assert.Equal(2, completed.RegistryCharacters);
+                Assert.True(completed.Elapsed >= TimeSpan.Zero);
+            });
+    }
     private static BookProject CreateBook()
     {
         return new BookProject
@@ -147,6 +215,17 @@ public sealed class CharacterDiscoveryWorkflowTests
         };
     }
 
+    private sealed class RecordingProgress
+        : IProgress<CharacterDiscoveryProgress>
+    {
+        public List<CharacterDiscoveryProgress> Events { get; } = [];
+
+        public void Report(
+            CharacterDiscoveryProgress value)
+        {
+            Events.Add(value);
+        }
+    }
     private sealed class StubCharacterDiscoveryService
         : ICharacterDiscoveryService
     {

@@ -23,6 +23,7 @@ public sealed class CharacterDiscoveryServiceTests
               "characters": [
                 {
                   "id": "marcia-miller",
+                  "isNamed": true,
                   "displayName": "Marcia Miller",
                   "aliases": [
                     "Miller",
@@ -64,6 +65,68 @@ public sealed class CharacterDiscoveryServiceTests
             generator.Schema.GetProperty("type").GetString());
     }
 
+    /// <summary>
+    /// Verifies that unnamed speakers receive chapter-scoped identities.
+    /// </summary>
+    [Fact]
+    public async Task DiscoverAsync_ScopesUnnamedCharacterId()
+    {
+        var generator = new StubStructuredTextGenerator(
+            """
+            {
+              "characters": [
+                {
+                  "id": "prisoner-01",
+                  "displayName": "Prisoner",
+                  "aliases": [],
+                  "description": "An unnamed prisoner.",
+                  "voiceTraits": [
+                    "strained"
+                  ],
+                  "voicePresentation": "male",
+                  "isNamed": false,
+                  "importance": "minor",
+                  "isNarrator": false
+                }
+              ]
+            }
+            """);
+
+        var service = new CharacterDiscoveryService(generator);
+
+        var characters = await service.DiscoverAsync(
+            CreateChapter(),
+            []);
+
+        var character = Assert.Single(characters);
+
+        Assert.Equal(
+            "chapter-001-prisoner-01",
+            character.Id);
+
+        var characterSchema = generator.Schema
+            .GetProperty("properties")
+            .GetProperty("characters")
+            .GetProperty("items");
+
+        Assert.True(
+            characterSchema
+                .GetProperty("properties")
+                .TryGetProperty(
+                    "isNamed",
+                    out var isNamedSchema));
+
+        Assert.Equal(
+            "boolean",
+            isNamedSchema.GetProperty("type").GetString());
+
+        Assert.Contains(
+            characterSchema
+                .GetProperty("required")
+                .EnumerateArray(),
+            property =>
+                property.GetString() == "isNamed");
+    }
     /// <summary>
     /// Verifies that reserved speaker IDs are rejected.
     /// </summary>

@@ -35,6 +35,12 @@ public sealed class CharacterProfile
     /// </summary>
     public string VoicePresentation { get; init; } = "unspecified";
     /// <summary>
+    /// Gets a value indicating whether the manuscript gives the
+    /// character a proper name or identity-specific title.
+    /// </summary>
+    public bool IsNamed { get; init; } = true;
+
+    /// <summary>
     /// Gets the character's narrative importance.
     /// </summary>
     public CharacterImportance Importance { get; init; }

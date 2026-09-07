@@ -24,8 +24,15 @@ public sealed partial class CharacterDiscoveryService
         character by name, title, surname, alias, pronoun, or description.
 
         Create a new lowercase hyphenated ID only when the speaker is not an
-        existing character. Unnamed speakers must receive stable descriptive
-        IDs such as guard-01 or dispatcher-01.
+        existing character. Set isNamed to true whenever the text provides a
+        proper name, including a single-word name, surname, or identity-specific
+        title. IDs derived from names such as woola, sarkoja, zad, dejah-thoris,
+        or lorquas-ptomel must have isNamed set to true. Set isNamed to false
+        only when the speaker is identified exclusively by a generic role or
+        description such as a guard, prisoner, warrior, attendant, or
+        dispatcher. Use descriptive IDs such as guard-01 or prisoner-01 for
+        unnamed speakers. Do not reuse an unnamed speaker from Known characters
+        unless the text explicitly establishes that it is the same individual.
 
         Do not create characters for places, objects, organizations, quoted
         documents, signs, memories without speech, or a normal third-person
@@ -129,13 +136,16 @@ public sealed partial class CharacterDiscoveryService
 
         return ValidateAndMap(
             response,
-            knownCharacters);
+            knownCharacters,
+            chapter.ChapterId);
     }
 
     private static IReadOnlyList<CharacterProfile> ValidateAndMap(
         CharacterDiscoveryResponse response,
-        IReadOnlyList<CharacterProfile> knownCharacters)
+        IReadOnlyList<CharacterProfile> knownCharacters,
+        string chapterId)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(chapterId);
         var knownById = knownCharacters.ToDictionary(
             character => character.Id,
             StringComparer.OrdinalIgnoreCase);
@@ -169,13 +179,6 @@ public sealed partial class CharacterDiscoveryService
                     $"Character ID '{candidate.Id}' is reserved.");
             }
 
-            if (!returnedIds.Add(candidate.Id))
-            {
-                throw new InvalidDataException(
-                    $"Character discovery returned duplicate ID " +
-                    $"'{candidate.Id}'.");
-            }
-
             if (string.IsNullOrWhiteSpace(candidate.DisplayName))
             {
                 throw new InvalidDataException(
@@ -192,11 +195,30 @@ public sealed partial class CharacterDiscoveryService
                     $"'{candidate.Importance}'.");
             }
 
-            var normalizedId = knownById.TryGetValue(
-                candidate.Id,
-                out var existing)
-                ? existing.Id
-                : candidate.Id;
+            var hasExistingCharacter =
+                knownById.TryGetValue(
+                    candidate.Id,
+                    out var existing);
+
+            var isNamed =
+                candidate.IsNamed ||
+                (hasExistingCharacter &&
+                 existing!.IsNamed);
+
+            var normalizedId =
+                hasExistingCharacter && isNamed
+                    ? existing!.Id
+                    : ScopeCharacterId(
+                        candidate.Id,
+                        isNamed,
+                        chapterId);
+
+            if (!returnedIds.Add(normalizedId))
+            {
+                throw new InvalidDataException(
+                    $"Character discovery returned duplicate ID " +
+                    $"'{normalizedId}'.");
+            }
 
             profiles.Add(
                 new CharacterProfile
@@ -210,12 +232,31 @@ public sealed partial class CharacterDiscoveryService
                     VoicePresentation = ResolvePresentation(
                         candidate.VoicePresentation,
                         candidate.VoiceTraits),
+                    IsNamed = isNamed,
                     Importance = importance,
                     IsNarrator = candidate.IsNarrator
                 });
         }
 
         return profiles;
+    }
+
+    private static string ScopeCharacterId(
+        string characterId,
+        bool isNamed,
+        string chapterId)
+    {
+        var chapterPrefix = $"{chapterId}-";
+
+        if (isNamed ||
+            characterId.StartsWith(
+                chapterPrefix,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return characterId;
+        }
+
+        return $"{chapterPrefix}{characterId}";
     }
 
     private static string ResolvePresentation(
@@ -329,7 +370,11 @@ public sealed partial class CharacterDiscoveryService
                           "female",
                           "unspecified"
                         ]
-                      },                      "importance": {
+                      },
+                      "isNamed": {
+                        "type": "boolean"
+                      },
+                      "importance": {
                         "type": "string",
                         "enum": [
                           "minor",
@@ -348,6 +393,7 @@ public sealed partial class CharacterDiscoveryService
                       "description",
                       "voiceTraits",
                       "voicePresentation",
+                      "isNamed",
                       "importance",
                       "isNarrator"
                     ]
@@ -387,6 +433,8 @@ public sealed partial class CharacterDiscoveryService
 
         public string VoicePresentation { get; init; } =
             "unspecified";
+
+        public bool IsNamed { get; init; }
 
         public string Importance { get; init; } = string.Empty;
 

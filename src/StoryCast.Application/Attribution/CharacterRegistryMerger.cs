@@ -106,6 +106,11 @@ public sealed class CharacterRegistryMerger
             }
         }
 
+        if (!discovery.IsNamed)
+        {
+            return -1;
+        }
+
         var discoveryNames = GetIdentityNames(discovery);
         var matchingIndexes = new List<int>();
 
@@ -113,6 +118,11 @@ public sealed class CharacterRegistryMerger
              index < existingCharacters.Count;
              index++)
         {
+            if (!existingCharacters[index].IsNamed)
+            {
+                continue;
+            }
+
             var existingNames = GetIdentityNames(
                 existingCharacters[index]);
 
@@ -201,6 +211,8 @@ public sealed class CharacterRegistryMerger
                 existing.VoicePresentation,
                 discovery.VoicePresentation,
                 existing.Id),
+            IsNamed =
+                existing.IsNamed || discovery.IsNamed,
             Importance = MaxImportance(
                 existing.Importance,
                 discovery.Importance),
@@ -229,6 +241,7 @@ public sealed class CharacterRegistryMerger
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
             VoicePresentation = character.VoicePresentation,
+            IsNamed = character.IsNamed,
             Importance = character.Importance,
             IsNarrator = character.IsNarrator
         };

@@ -111,7 +111,9 @@ internal static class CharacterCommands
 
             var result = await workflow.ExecuteAsync(
                 book,
-                force: force);
+                force: force,
+                progress:
+                    new CharacterDiscoveryConsoleProgress());
 
             Console.WriteLine();
             Console.WriteLine("Character discovery complete.");
@@ -133,12 +135,47 @@ internal static class CharacterCommands
             exception is IOException or
             HttpRequestException or
             UnauthorizedAccessException or
-            UriFormatException)
+            UriFormatException or
+            InvalidDataException)
         {
             Console.Error.WriteLine(
                 $"Character discovery failed: {exception.Message}");
 
             return 1;
+        }
+    }
+
+    private sealed class CharacterDiscoveryConsoleProgress
+        : IProgress<CharacterDiscoveryProgress>
+    {
+        public void Report(
+            CharacterDiscoveryProgress value)
+        {
+            var position =
+                $"[{value.ChapterIndex + 1}/{value.ChapterCount}]";
+
+            if (value.Status == "starting")
+            {
+                Console.WriteLine(
+                    $"{position} {value.ChapterId} | discovering...");
+
+                return;
+            }
+
+            if (value.Status == "skipped")
+            {
+                Console.WriteLine(
+                    $"{position} {value.ChapterId} | skipped | " +
+                    $"{value.RegistryCharacters} total");
+
+                return;
+            }
+
+            Console.WriteLine(
+                $"{position} {value.ChapterId} | completed | " +
+                $"{value.DiscoveredCharacters} found | " +
+                $"{value.RegistryCharacters} total | " +
+                $"{value.Elapsed.TotalSeconds:F1}s");
         }
     }
 

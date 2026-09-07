@@ -172,6 +172,48 @@ public sealed class CharacterRegistryMergerTests
                 [discovery]));
     }
 
+    /// <summary>
+    /// Verifies that anonymous roles with the same label remain distinct.
+    /// </summary>
+    [Fact]
+    public void Merge_DoesNotMatchAnonymousCharactersByDisplayName()
+    {
+        var registry = CreateRegistry(
+            new CharacterProfile
+            {
+                Id = "chapter-001-prisoner-01",
+                DisplayName = "Prisoner",
+                IsNamed = false,
+                Importance = CharacterImportance.Minor
+            });
+
+        var discovery = new CharacterProfile
+        {
+            Id = "chapter-002-prisoner-01",
+            DisplayName = "Prisoner",
+            IsNamed = false,
+            Importance = CharacterImportance.Minor
+        };
+
+        var merger = new CharacterRegistryMerger();
+
+        var result = merger.Merge(
+            registry,
+            "test-book",
+            "chapter-002",
+            new string('b', 64),
+            [discovery]);
+
+        Assert.Equal(2, result.Characters.Count);
+        Assert.Contains(
+            result.Characters,
+            character =>
+                character.Id == "chapter-001-prisoner-01");
+        Assert.Contains(
+            result.Characters,
+            character =>
+                character.Id == "chapter-002-prisoner-01");
+    }
     private static CharacterRegistry CreateRegistry(
         CharacterProfile character)
     {

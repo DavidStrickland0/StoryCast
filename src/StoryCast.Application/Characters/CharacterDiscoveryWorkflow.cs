@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using StoryCast.Application.Attribution;
 using StoryCast.Application.Preparation;
 using StoryCast.Domain.Books;
@@ -63,11 +64,15 @@ public sealed class CharacterDiscoveryWorkflow
     /// When true, processes chapters even when their source hashes
     /// have already been recorded.
     /// </param>
+    /// <param name="progress">
+    /// Receives synchronous chapter-level progress notifications.
+    /// </param>
     /// <returns>A summary of processed and skipped chapters.</returns>
     public async Task<CharacterDiscoveryWorkflowResult> ExecuteAsync(
         BookProject book,
         CancellationToken cancellationToken = default,
-        bool force = false)
+        bool force = false,
+        IProgress<CharacterDiscoveryProgress>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(book);
 
@@ -78,12 +83,19 @@ public sealed class CharacterDiscoveryWorkflow
         var processedChapters = 0;
         var skippedChapters = 0;
 
-        foreach (var sourceChapter in book.Manuscript.Chapters)
+        for (var chapterIndex = 0;
+             chapterIndex < book.Manuscript.Chapters.Count;
+             chapterIndex++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            var sourceChapter =
+                book.Manuscript.Chapters[chapterIndex];
+
             var preparedChapter = preparer.Prepare(
                 sourceChapter);
+
+            var stopwatch = Stopwatch.StartNew();
 
             if (!force && registry is not null &&
                 registry.ProcessedChapterHashes.TryGetValue(
@@ -95,8 +107,38 @@ public sealed class CharacterDiscoveryWorkflow
                     StringComparison.OrdinalIgnoreCase))
             {
                 skippedChapters++;
+                stopwatch.Stop();
+
+                progress?.Report(
+                    new CharacterDiscoveryProgress
+                    {
+                        ChapterIndex = chapterIndex,
+                        ChapterCount =
+                            book.Manuscript.Chapters.Count,
+                        ChapterId = preparedChapter.ChapterId,
+                        Status = "skipped",
+                        DiscoveredCharacters = 0,
+                        RegistryCharacters =
+                            registry.Characters.Count,
+                        Elapsed = stopwatch.Elapsed
+                    });
+
                 continue;
             }
+
+            progress?.Report(
+                new CharacterDiscoveryProgress
+                {
+                    ChapterIndex = chapterIndex,
+                    ChapterCount =
+                        book.Manuscript.Chapters.Count,
+                    ChapterId = preparedChapter.ChapterId,
+                    Status = "starting",
+                    DiscoveredCharacters = 0,
+                    RegistryCharacters =
+                        registry?.Characters.Count ?? 0,
+                    Elapsed = TimeSpan.Zero
+                });
 
             var knownCharacters =
                 registry?.Characters ?? [];
@@ -120,6 +162,21 @@ public sealed class CharacterDiscoveryWorkflow
                 cancellationToken);
 
             processedChapters++;
+            stopwatch.Stop();
+
+            progress?.Report(
+                new CharacterDiscoveryProgress
+                {
+                    ChapterIndex = chapterIndex,
+                    ChapterCount =
+                        book.Manuscript.Chapters.Count,
+                    ChapterId = preparedChapter.ChapterId,
+                    Status = "completed",
+                    DiscoveredCharacters = discoveries.Count,
+                    RegistryCharacters =
+                        registry.Characters.Count,
+                    Elapsed = stopwatch.Elapsed
+                });
         }
 
         return new CharacterDiscoveryWorkflowResult
