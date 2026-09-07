@@ -240,7 +240,7 @@ def main() -> int:
         else:
             run_directory.mkdir(
                 parents=True,
-                exist_ok=False,
+                exist_ok=True,
             )
 
     chapter_directory = (

@@ -379,6 +379,51 @@ internal static class BookProductionCommands
                         $"run.json: {chapter.RunDirectory}");
                 }
 
+                if (hasChapterRun)
+                {
+                    var existingChapterRun =
+                        await LoadChapterRunAsync(
+                            chapterRunManifestPath);
+
+                    if (string.Equals(
+                            existingChapterRun.Status,
+                            "completed",
+                            StringComparison.Ordinal))
+                    {
+                        var recoveredAudioPath = Path.Combine(
+                            chapter.RunDirectory,
+                            chapter.ChapterId,
+                            $"{chapter.ChapterId}.mastered.wav");
+
+                        if (!File.Exists(recoveredAudioPath))
+                        {
+                            throw new FileNotFoundException(
+                                $"Completed chapter " +
+                                $"{chapter.ChapterId} is missing " +
+                                $"mastered audio: " +
+                                $"{recoveredAudioPath}",
+                                recoveredAudioPath);
+                        }
+
+                        chapter.Status = "completed";
+                        chapter.ExitCode = 0;
+                        chapter.MasteredAudioPath =
+                            recoveredAudioPath;
+                        manifest.CurrentChapterId = null;
+
+                        await WriteManifestAsync(
+                            manifestPath,
+                            manifest);
+
+                        Console.WriteLine(
+                            $"Recovered completed chapter " +
+                            $"{chapter.ChapterId} from its " +
+                            "chapter run.");
+
+                        continue;
+                    }
+                }
+
                 var chapterArguments = new List<string>
                 {
                     book.RootPath,
