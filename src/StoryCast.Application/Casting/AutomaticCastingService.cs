@@ -64,26 +64,58 @@ public sealed class AutomaticCastingService
     public async Task<IReadOnlyList<CastingAssignment>> AssignAsync(
         CharacterRegistry registry,
         IReadOnlyList<VoiceProfile> voices,
+        IReadOnlyList<CastingAssignment> existingAssignments,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(voices);
+        ArgumentNullException.ThrowIfNull(existingAssignments);
 
-        var roleIds = registry.Characters
-            .Select(character => character.Id)
-            .Append("narrator")
+        var existingRoleIds = existingAssignments
+            .Select(assignment => assignment.CharacterId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var existingVoiceIds = existingAssignments
+            .Select(assignment => assignment.VoiceId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var missingCharacters = registry.Characters
+            .Where(character => !existingRoleIds.Contains(character.Id))
             .ToArray();
 
-        if (voices.Count < roleIds.Length)
+        var narratorIsMissing =
+            !existingRoleIds.Contains("narrator");
+
+        var roleIds = missingCharacters
+            .Select(character => character.Id)
+            .Concat(
+                narratorIsMissing
+                    ? ["narrator"]
+                    : [])
+            .ToArray();
+
+        if (roleIds.Length == 0)
         {
-            throw new InvalidDataException(
-                $"Casting requires {roleIds.Length} unique voices but " +
-                $"only {voices.Count} are eligible.");
+            return [];
         }
 
-        var roles = registry.Characters
-            .Select(
-                character => new
+        var availableVoices = voices
+            .Where(voice => !existingVoiceIds.Contains(voice.Id))
+            .ToArray();
+
+        if (availableVoices.Length < roleIds.Length)
+        {
+            throw new InvalidDataException(
+                $"Casting requires {roleIds.Length} additional unique " +
+                $"voices but only {availableVoices.Length} unused verified " +
+                "voices are eligible.");
+        }
+
+        var roles = new List<object>();
+
+        roles.AddRange(
+            missingCharacters.Select(
+                character => (object)new
                 {
                     character.Id,
                     character.DisplayName,
@@ -94,9 +126,11 @@ public sealed class AutomaticCastingService
                     Importance =
                         character.Importance.ToString(),
                     character.IsNarrator
-                })
-            .Cast<object>()
-            .Append(
+                }));
+
+        if (narratorIsMissing)
+        {
+            roles.Add(
                 new
                 {
                     Id = "narrator",
@@ -110,12 +144,13 @@ public sealed class AutomaticCastingService
                         "consistent",
                         "sustained"
                     },
+                    VoicePresentation = "unspecified",
                     Importance = "Primary",
                     IsNarrator = true
-                })
-            .ToArray();
+                });
+        }
 
-        var voiceContext = voices.Select(
+        var voiceContext = availableVoices.Select(
             voice => new
             {
                 voice.Id,
@@ -143,7 +178,9 @@ public sealed class AutomaticCastingService
 
         var schema = CreateResponseSchema(
             roleIds,
-            voices.Select(voice => voice.Id).ToArray());
+            availableVoices
+                .Select(voice => voice.Id)
+                .ToArray());
 
         var responseText = await generator.GenerateAsync(
             SystemPrompt,
@@ -178,11 +215,6 @@ public sealed class AutomaticCastingService
                 Rationale = assignment.Rationale.Trim(),
                 IsLocked = false
             }).ToArray();
-
-        validator.Validate(
-            registry,
-            voices,
-            assignments);
 
         return assignments;
     }

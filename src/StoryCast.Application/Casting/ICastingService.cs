@@ -13,6 +13,10 @@ public interface ICastingService
     /// </summary>
     /// <param name="registry">The established character registry.</param>
     /// <param name="voices">The eligible voice profiles.</param>
+    /// <param name="existingAssignments">
+    /// Existing assignments whose character and voice selections must be
+    /// preserved.
+    /// </param>
     /// <param name="cancellationToken">
     /// A token that may cancel the operation.
     /// </param>
@@ -20,5 +24,6 @@ public interface ICastingService
     Task<IReadOnlyList<CastingAssignment>> AssignAsync(
         CharacterRegistry registry,
         IReadOnlyList<VoiceProfile> voices,
+        IReadOnlyList<CastingAssignment> existingAssignments,
         CancellationToken cancellationToken = default);
 }

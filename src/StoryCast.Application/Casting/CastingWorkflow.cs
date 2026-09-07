@@ -106,41 +106,49 @@ public sealed class CastingWorkflow
             book,
             cancellationToken);
 
-        if (existingPlan is not null)
-        {
-            try
-            {
-                validator.Validate(
-                    registry,
-                    voices,
-                    existingPlan.Assignments);
+        var existingAssignments =
+            existingPlan?.Assignments ??
+            [];
 
-                return new CastingWorkflowResult
-                {
-                    EligibleVoiceCount = voices.Count,
-                    AssignmentCount =
-                        existingPlan.Assignments.Count,
-                    ReusedExistingPlan = true
-                };
-            }
-            catch (InvalidDataException exception)
+        var requiredRoleIds = registry.Characters
+            .Select(character => character.Id)
+            .Append("narrator")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var existingRoleIds = existingAssignments
+            .Select(assignment => assignment.CharacterId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var missingRoleIds = requiredRoleIds
+            .Except(
+                existingRoleIds,
+                StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (missingRoleIds.Length == 0)
+        {
+            validator.Validate(
+                registry,
+                voices,
+                existingAssignments);
+
+            return new CastingWorkflowResult
             {
-                if (existingPlan.Assignments.Any(
-                        assignment => assignment.IsLocked))
-                {
-                    throw new InvalidDataException(
-                        "The existing casting plan is stale and contains " +
-                        "locked assignments. Resolve or unlock those " +
-                        "assignments before recasting.",
-                        exception);
-                }
-            }
+                EligibleVoiceCount = voices.Count,
+                AssignmentCount = existingAssignments.Count,
+                ReusedExistingPlan = true
+            };
         }
 
-        var assignments = await castingService.AssignAsync(
+        var newAssignments = await castingService.AssignAsync(
             registry,
             voices,
+            existingAssignments,
             cancellationToken);
+
+        var assignments = existingAssignments
+            .Concat(newAssignments)
+            .ToArray();
 
         validator.Validate(
             registry,
@@ -162,8 +170,9 @@ public sealed class CastingWorkflow
         return new CastingWorkflowResult
         {
             EligibleVoiceCount = voices.Count,
-            AssignmentCount = assignments.Count,
-            ReusedExistingPlan = false
+            AssignmentCount = assignments.Length,
+            ReusedExistingPlan =
+                existingAssignments.Count > 0
         };
     }
 }
