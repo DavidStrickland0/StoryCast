@@ -78,11 +78,16 @@ public sealed class DialogueAttributionWorkflow
     /// <param name="force">
     /// Whether existing current artifacts should be regenerated.
     /// </param>
+    /// <param name="chapterId">
+    /// The optional chapter to process. When omitted, every chapter is
+    /// considered.
+    /// </param>
     /// <returns>A summary of the completed attribution work.</returns>
     public async Task<DialogueAttributionWorkflowResult> ExecuteAsync(
         BookProject book,
         CancellationToken cancellationToken = default,
-        bool force = false)
+        bool force = false,
+        string? chapterId = null)
     {
         ArgumentNullException.ThrowIfNull(book);
 
@@ -102,7 +107,24 @@ public sealed class DialogueAttributionWorkflow
         var dialogueSegments = 0;
         var lowConfidenceAssignments = 0;
 
-        foreach (var chapter in book.Manuscript.Chapters)
+        var chapters = book.Manuscript.Chapters
+            .Where(
+                chapter =>
+                    chapterId is null ||
+                    string.Equals(
+                        chapter.Id,
+                        chapterId,
+                        StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        if (chapterId is not null &&
+            chapters.Length == 0)
+        {
+            throw new InvalidDataException(
+                $"Chapter '{chapterId}' was not found in book '{book.Id}'.");
+        }
+
+        foreach (var chapter in chapters)
         {
             cancellationToken.ThrowIfCancellationRequested();
 

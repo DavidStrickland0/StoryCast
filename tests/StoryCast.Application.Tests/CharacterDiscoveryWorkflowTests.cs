@@ -159,6 +159,64 @@ public sealed class CharacterDiscoveryWorkflowTests
                 Assert.True(completed.Elapsed >= TimeSpan.Zero);
             });
     }
+    /// <summary>
+    /// Verifies that chapter-scoped discovery processes only the requested
+    /// chapter while retaining its original book position in progress.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_ProcessesOnlyRequestedChapter()
+    {
+        var store = new MemoryCharacterRegistryStore();
+        var discovery = new StubCharacterDiscoveryService();
+        var progress = new RecordingProgress();
+
+        var workflow = new CharacterDiscoveryWorkflow(
+            new ChapterTextPreparer(),
+            discovery,
+            new CharacterRegistryMerger(),
+            store);
+
+        var result = await workflow.ExecuteAsync(
+            CreateBook(),
+            progress: progress,
+            chapterId: "chapter-002");
+
+        Assert.Equal(1, result.ProcessedChapters);
+        Assert.Equal(0, result.SkippedChapters);
+        Assert.Equal(1, result.CharacterCount);
+        Assert.Equal(1, discovery.CallCount);
+        Assert.Equal(1, store.SaveCount);
+
+        Assert.NotNull(store.Registry);
+        Assert.Single(store.Registry.Characters);
+        Assert.Equal(
+            "elias-thorne",
+            store.Registry.Characters[0].Id);
+
+        Assert.Single(
+            store.Registry.ProcessedChapterHashes);
+
+        Assert.True(
+            store.Registry.ProcessedChapterHashes.ContainsKey(
+                "chapter-002"));
+
+        Assert.Collection(
+            progress.Events,
+            starting =>
+            {
+                Assert.Equal("chapter-002", starting.ChapterId);
+                Assert.Equal("starting", starting.Status);
+                Assert.Equal(1, starting.ChapterIndex);
+                Assert.Equal(2, starting.ChapterCount);
+            },
+            completed =>
+            {
+                Assert.Equal("chapter-002", completed.ChapterId);
+                Assert.Equal("completed", completed.Status);
+                Assert.Equal(1, completed.ChapterIndex);
+                Assert.Equal(2, completed.ChapterCount);
+            });
+    }
     private static BookProject CreateBook()
     {
         return new BookProject

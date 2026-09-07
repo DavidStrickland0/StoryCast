@@ -67,12 +67,17 @@ public sealed class CharacterDiscoveryWorkflow
     /// <param name="progress">
     /// Receives synchronous chapter-level progress notifications.
     /// </param>
+    /// <param name="chapterId">
+    /// The optional chapter to process. When omitted, every chapter is
+    /// considered.
+    /// </param>
     /// <returns>A summary of processed and skipped chapters.</returns>
     public async Task<CharacterDiscoveryWorkflowResult> ExecuteAsync(
         BookProject book,
         CancellationToken cancellationToken = default,
         bool force = false,
-        IProgress<CharacterDiscoveryProgress>? progress = null)
+        IProgress<CharacterDiscoveryProgress>? progress = null,
+        string? chapterId = null)
     {
         ArgumentNullException.ThrowIfNull(book);
 
@@ -83,9 +88,26 @@ public sealed class CharacterDiscoveryWorkflow
         var processedChapters = 0;
         var skippedChapters = 0;
 
-        for (var chapterIndex = 0;
-             chapterIndex < book.Manuscript.Chapters.Count;
-             chapterIndex++)
+        var chapterIndexes = Enumerable.Range(
+                0,
+                book.Manuscript.Chapters.Count)
+            .Where(
+                index =>
+                    chapterId is null ||
+                    string.Equals(
+                        book.Manuscript.Chapters[index].Id,
+                        chapterId,
+                        StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        if (chapterId is not null &&
+            chapterIndexes.Length == 0)
+        {
+            throw new InvalidDataException(
+                $"Chapter '{chapterId}' was not found in book '{book.Id}'.");
+        }
+
+        foreach (var chapterIndex in chapterIndexes)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
