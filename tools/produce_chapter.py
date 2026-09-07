@@ -38,7 +38,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.18,
     )
-    parser.add_argument(
+    run_directory_group = (
+        parser.add_mutually_exclusive_group()
+    )
+    run_directory_group.add_argument(
+        "--run-directory",
+        type=Path,
+        default=None,
+    )
+    run_directory_group.add_argument(
         "--resume-run-directory",
         type=Path,
         default=None,
@@ -405,6 +413,16 @@ def main() -> int:
         if not run_directory.is_dir():
             raise FileNotFoundError(
                 f"Resume run directory was not found: "
+                f"{run_directory}"
+            )
+    elif args.run_directory is not None:
+        run_directory = (
+            args.run_directory.resolve()
+        )
+
+        if run_directory.exists():
+            raise FileExistsError(
+                f"New run directory already exists: "
                 f"{run_directory}"
             )
     else:
