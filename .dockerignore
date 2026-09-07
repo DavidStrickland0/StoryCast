@@ -1,0 +1,13 @@
+.git
+.gitignore
+**/bin
+**/obj
+**/__pycache__
+**/*.pyc
+.vs
+.vscode
+voices
+tests
+src
+*.sln
+*.slnx

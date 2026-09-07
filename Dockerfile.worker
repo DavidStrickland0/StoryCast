@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+
+FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV HF_HOME=/models/huggingface
+ENV XDG_CACHE_HOME=/models/cache
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ffmpeg \
+        libsndfile1 \
+        python3.12 \
+        python3-pip \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.worker.txt /app/requirements.worker.txt
+
+RUN python3.12 -m venv /opt/storycast \
+    && /opt/storycast/bin/python -m pip install --upgrade pip setuptools wheel \
+    && /opt/storycast/bin/python -m pip install \
+        --requirement /app/requirements.worker.txt
+
+COPY tools /app/tools
+
+ENV PATH=/opt/storycast/bin:${PATH}
+ENV PYTHONPATH=/app/tools
+
+VOLUME ["/books", "/voices", "/models"]
+
+ENTRYPOINT ["python"]

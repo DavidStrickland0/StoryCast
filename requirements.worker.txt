@@ -1,0 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+torch==2.6.0+cu126
+torchaudio==2.6.0+cu126
+chatterbox-tts==0.1.7
+faster-whisper==1.2.1
+numpy==1.26.4
+soundfile==0.14.0
