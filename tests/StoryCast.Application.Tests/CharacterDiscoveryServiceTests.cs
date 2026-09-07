@@ -158,6 +158,45 @@ public sealed class CharacterDiscoveryServiceTests
                 []));
     }
 
+    /// <summary>
+    /// Verifies that a chapter-scoped ID returned for a named character is
+    /// normalized to its persistent book-level identity.
+    /// </summary>
+    [Fact]
+    public async Task DiscoverAsync_RemovesChapterScopeFromNamedCharacter()
+    {
+        var generator = new StubStructuredTextGenerator(
+            """
+            {
+              "characters": [
+                {
+                  "id": "chapter-027-zad",
+                  "displayName": "Zad",
+                  "aliases": [],
+                  "description": "A named Martian warrior.",
+                  "voiceTraits": [
+                    "aggressive"
+                  ],
+                  "voicePresentation": "male",
+                  "isNamed": true,
+                  "importance": "major",
+                  "isNarrator": false
+                }
+              ]
+            }
+            """);
+
+        var service = new CharacterDiscoveryService(generator);
+
+        var characters = await service.DiscoverAsync(
+            CreateChapter(),
+            []);
+
+        var character = Assert.Single(characters);
+
+        Assert.Equal("zad", character.Id);
+        Assert.True(character.IsNamed);
+    }
     private static PreparedChapter CreateChapter()
     {
         return new PreparedChapter

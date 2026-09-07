@@ -91,6 +91,7 @@ public sealed partial class CharacterDiscoveryService
                 character.Aliases,
                 character.Description,
                 character.VoicePresentation,
+                character.IsNamed,
                 character.IsNarrator
             });
 
@@ -248,8 +249,14 @@ public sealed partial class CharacterDiscoveryService
     {
         var chapterPrefix = $"{chapterId}-";
 
-        if (isNamed ||
-            characterId.StartsWith(
+        if (isNamed)
+        {
+            return ChapterScopedCharacterIdRegex().Replace(
+                characterId,
+                string.Empty);
+        }
+
+        if (characterId.StartsWith(
                 chapterPrefix,
                 StringComparison.OrdinalIgnoreCase))
         {
@@ -413,6 +420,12 @@ public sealed partial class CharacterDiscoveryService
         @"^[a-z0-9]+(?:-[a-z0-9]+)*$",
         RegexOptions.CultureInvariant)]
     private static partial Regex CharacterIdRegex();
+
+    [GeneratedRegex(
+        @"^chapter-[0-9]+-",
+        RegexOptions.CultureInvariant |
+        RegexOptions.IgnoreCase)]
+    private static partial Regex ChapterScopedCharacterIdRegex();
 
     private sealed class CharacterDiscoveryResponse
     {
