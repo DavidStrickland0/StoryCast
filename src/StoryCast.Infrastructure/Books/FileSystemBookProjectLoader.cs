@@ -56,19 +56,78 @@ public sealed class FileSystemBookProjectLoader : IBookProjectLoader
 
         ValidateManifest(manifest, manifestPath);
 
+        var configuredChapters = manifest.Chapters.ToList();
+        var chapterDirectory = Path.Combine(
+            rootPath,
+            "chapters");
+
+        if (Directory.Exists(chapterDirectory))
+        {
+            var discoveredChapters = Directory
+                .EnumerateFiles(
+                    chapterDirectory,
+                    "chapter-*",
+                    SearchOption.TopDirectoryOnly)
+                .Where(
+                    path =>
+                        Path.GetExtension(path).Equals(
+                            ".md",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        Path.GetExtension(path).Equals(
+                            ".markdown",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        Path.GetExtension(path).Equals(
+                            ".txt",
+                            StringComparison.OrdinalIgnoreCase))
+                .OrderBy(
+                    path => Path.GetFileName(path),
+                    StringComparer.OrdinalIgnoreCase);
+
+            foreach (var discoveredChapter in discoveredChapters)
+            {
+                var relativePath = Path.GetRelativePath(
+                    rootPath,
+                    discoveredChapter);
+
+                var alreadyConfigured =
+                    configuredChapters.Any(
+                        configuredPath =>
+                            string.Equals(
+                                Path.GetFullPath(
+                                    Path.Combine(
+                                        rootPath,
+                                        configuredPath)),
+                                Path.GetFullPath(
+                                    discoveredChapter),
+                                StringComparison.OrdinalIgnoreCase));
+
+                if (!alreadyConfigured)
+                {
+                    configuredChapters.Add(relativePath);
+                }
+            }
+        }
+
+
+        if (configuredChapters.Count == 0)
+        {
+            throw new InvalidDataException(
+                $"No chapters were found for book: {manifestPath}");
+        }
+
         var chapterPaths = new HashSet<string>(
             StringComparer.OrdinalIgnoreCase);
 
         var chapters = new List<ManuscriptChapter>(
-            manifest.Chapters.Count);
+            configuredChapters.Count);
 
         for (var index = 0;
-             index < manifest.Chapters.Count;
+             index < configuredChapters.Count;
              index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var configuredPath = manifest.Chapters[index];
+            var configuredPath = configuredChapters[index];
 
             if (string.IsNullOrWhiteSpace(configuredPath))
             {
@@ -170,12 +229,6 @@ public sealed class FileSystemBookProjectLoader : IBookProjectLoader
                 $"Book manifest is missing a language: {manifestPath}");
         }
 
-        if (manifest.Chapters.Count == 0)
-        {
-            throw new InvalidDataException(
-                $"Book manifest does not contain any chapters: " +
-                manifestPath);
-        }
     }
 
     private static string ResolveContainedPath(

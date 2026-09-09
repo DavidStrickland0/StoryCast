@@ -11,6 +11,8 @@ namespace StoryCast.Application.Casting;
 public sealed class AutomaticCastingService
     : ICastingService
 {
+    private const int MaximumAttempts = 3;
+
     private const string SystemPrompt =
         """
         You cast voices for a multi-voice audiobook.
@@ -182,12 +184,81 @@ public sealed class AutomaticCastingService
                 .Select(voice => voice.Id)
                 .ToArray());
 
-        var responseText = await generator.GenerateAsync(
-            SystemPrompt,
-            userPrompt,
-            schema,
-            cancellationToken);
+        var attemptPrompt = userPrompt;
+        InvalidDataException? lastFailure = null;
 
+        for (var attempt = 1;
+             attempt <= MaximumAttempts;
+             attempt++)
+        {
+            var responseText = await generator.GenerateAsync(
+                SystemPrompt,
+                attemptPrompt,
+                schema,
+                cancellationToken);
+
+            try
+            {
+                var assignments =
+                    ParseAssignments(responseText);
+
+                var completeAssignments =
+                    existingAssignments
+                        .Concat(assignments)
+                        .ToArray();
+
+                var activeRoleIds = registry.Characters
+                    .Select(character => character.Id)
+                    .Append("narrator")
+                    .ToHashSet(
+                        StringComparer.OrdinalIgnoreCase);
+
+                var activeAssignments = completeAssignments
+                    .Where(
+                        assignment => activeRoleIds.Contains(
+                            assignment.CharacterId))
+                    .ToArray();
+
+                validator.Validate(
+                    registry,
+                    voices,
+                    activeAssignments);
+
+                return assignments;
+            }
+            catch (InvalidDataException exception)
+                when (attempt < MaximumAttempts)
+            {
+                lastFailure = exception;
+
+                attemptPrompt =
+                    $"""
+                    {userPrompt}
+
+                    The previous casting response was invalid:
+                    {exception.Message}
+
+                    Return a corrected complete assignment for every supplied
+                    role. Use each role exactly once and each eligible voice
+                    at most once. Do not return roles omitted from the supplied
+                    role list.
+                    """;
+            }
+            catch (InvalidDataException exception)
+            {
+                lastFailure = exception;
+            }
+        }
+
+        throw new InvalidDataException(
+            $"Automatic casting failed after {MaximumAttempts} attempts.",
+            lastFailure);
+    }
+
+    private static IReadOnlyList<CastingAssignment>
+        ParseAssignments(
+            string responseText)
+    {
         CastingResponse response;
 
         try
@@ -206,17 +277,26 @@ public sealed class AutomaticCastingService
                 exception);
         }
 
-        var assignments = response.Assignments.Select(
+        return response.Assignments.Select(
             assignment => new CastingAssignment
             {
                 CharacterId = assignment.CharacterId,
                 VoiceId = assignment.VoiceId,
                 Confidence = assignment.Confidence,
                 Rationale = assignment.Rationale.Trim(),
-                IsLocked = false
+                IsLocked = false,
+                Synthesis = new CastingSynthesisSettings
+                {
+                    Exaggeration = string.Equals(
+                        assignment.CharacterId,
+                        "narrator",
+                        StringComparison.OrdinalIgnoreCase)
+                            ? 0.4m
+                            : 0.65m,
+                    CfgWeight = 0.5m,
+                    Temperature = 0.7m
+                }
             }).ToArray();
-
-        return assignments;
     }
 
     private static JsonElement CreateResponseSchema(

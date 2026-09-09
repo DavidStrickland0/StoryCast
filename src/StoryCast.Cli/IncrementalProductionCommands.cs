@@ -103,10 +103,7 @@ internal static class IncrementalProductionCommands
                             chapterState.SourceSha256,
                             prepared.SourceSha256,
                             StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(
-                            chapterState.Status,
-                            "completed",
-                            StringComparison.OrdinalIgnoreCase));
+                        HasCompletedArtifact(chapterState, prepared.ChapterId));
 
                 if (!completed)
                 {
@@ -383,6 +380,101 @@ internal static class IncrementalProductionCommands
     }
 
     /// <summary>
+    /// Processes available chapters until the book is caught up.
+    /// </summary>
+    /// <param name="args">The continuous-production arguments.</param>
+    /// <returns>
+    /// A task containing zero when all available chapters complete;
+    /// otherwise, a nonzero exit code.
+    /// </returns>
+    public static async Task<int> ProduceRunAsync(
+        string[] args)
+    {
+        if (args.Length == 0 ||
+            args[0].StartsWith("--", StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine(
+                "Continuous production requires a book directory.");
+
+            return 1;
+        }
+
+        while (true)
+        {
+            var exitCode = await ProduceNextAsync(args);
+
+            if (exitCode != 0)
+            {
+                return exitCode;
+            }
+
+            if (!await HasIncompleteChapterAsync(
+                    Path.GetFullPath(args[0])))
+            {
+                Console.WriteLine();
+                Console.WriteLine(
+                    "Production is caught up. " +
+                    "No incomplete chapters remain.");
+
+                return 0;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(
+                "===== Advancing to next chapter =====");
+            Console.WriteLine();
+        }
+    }
+    /// <summary>
+    /// Displays detailed help for continuous chapter production.
+    /// </summary>
+    public static void WriteRunHelp()
+    {
+        Console.WriteLine(
+            """
+            StoryCast continuous chapter production
+
+            Usage:
+              storycast produce run <book-directory> --model <model> [options]
+
+            Behavior:
+              Processes chapters in manuscript order. Each chapter completes
+              character discovery, dialogue attribution, continuity-preserving
+              casting, Docker synthesis, verification, assembly, and mastering
+              before the next chapter begins.
+
+              Processing stops when all currently available chapters are
+              complete or when one chapter fails. Run the same command again
+              to resume the failed chapter and then continue forward.
+
+            Continuity:
+              Character identities and casting assignments are book-wide.
+              Existing characters and the narrator retain their assigned
+              voices across every chapter. New characters receive unused
+              verified voices.
+
+            Options:
+              --model <model>
+                  Installed Ollama model used for analysis and casting.
+
+              --ollama-url <url>
+                  Ollama endpoint. Defaults to http://localhost:11434/.
+
+              --library <path>
+                  Analyzed verified voice library. Defaults to .\voices.
+
+              --worker-image <image>
+                  Docker worker image. Defaults to storycast-worker:dev.
+
+              --whisper-model <model>
+                  Whisper verification model. Defaults to small.en.
+
+              --help, -h
+                  Display this help.
+            """);
+    }
+
+    /// <summary>
     /// Displays detailed help for incremental chapter production.
     /// </summary>
     public static void WriteHelp()
@@ -438,6 +530,77 @@ internal static class IncrementalProductionCommands
             """);
     }
 
+    private static async Task<bool> HasIncompleteChapterAsync(
+        string bookPath)
+    {
+        var book = await new FileSystemBookProjectLoader()
+            .LoadAsync(bookPath);
+
+        var statePath = Path.Combine(
+            book.RootPath,
+            "production",
+            "incremental-production.json");
+
+        var state = await LoadStateAsync(
+            statePath,
+            book.Id);
+
+        var preparer = new ChapterTextPreparer();
+
+        return book.Manuscript.Chapters.Any(
+            chapter =>
+            {
+                var prepared = preparer.Prepare(chapter);
+
+                return !state.Chapters.Any(
+                    chapterState =>
+                        string.Equals(
+                            chapterState.ChapterId,
+                            prepared.ChapterId,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(
+                            chapterState.SourceSha256,
+                            prepared.SourceSha256,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        HasCompletedArtifact(chapterState, prepared.ChapterId));
+            });
+    }
+
+    /// <summary>
+    /// Determines whether a completed state entry still has its mastered
+    /// chapter audio.
+    /// </summary>
+    /// <param name="chapterState">
+    /// The persisted incremental chapter state.
+    /// </param>
+    /// <param name="chapterId">
+    /// The expected chapter identifier.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the entry is complete and its mastered
+    /// audio still exists.
+    /// </returns>
+    private static bool HasCompletedArtifact(
+        IncrementalChapterState chapterState,
+        string chapterId)
+    {
+        if (!string.Equals(
+                chapterState.Status,
+                "completed",
+                StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(
+                chapterState.RunDirectory))
+        {
+            return false;
+        }
+
+        var masteredAudioPath = Path.Combine(
+            chapterState.RunDirectory,
+            chapterId,
+            $"{chapterId}.mastered.wav");
+
+        return File.Exists(masteredAudioPath);
+    }
     private static async Task<IncrementalProductionState>
         LoadStateAsync(
             string path,

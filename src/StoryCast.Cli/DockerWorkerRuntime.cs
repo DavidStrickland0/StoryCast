@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
 
 internal sealed class DockerWorkerRuntime
 {
@@ -67,6 +68,11 @@ internal sealed class DockerWorkerRuntime
     /// <summary>
     /// Gets the voice-library path visible inside the container.
     /// </summary>
+    /// <summary>
+    /// Gets standard-error output captured from the most recent worker.
+    /// </summary>
+    public string LastErrorOutput { get; private set; } =
+        string.Empty;
     public string LibraryPath => ContainerLibraryPath;
 
     /// <summary>
@@ -154,7 +160,8 @@ internal sealed class DockerWorkerRuntime
         var startInfo = new ProcessStartInfo
         {
             FileName = "docker",
-            UseShellExecute = false
+            UseShellExecute = false,
+            RedirectStandardError = true
         };
 
         startInfo.ArgumentList.Add("run");
@@ -197,10 +204,23 @@ internal sealed class DockerWorkerRuntime
             startInfo.ArgumentList.Add(argument);
         }
 
+        var errorOutput = new StringBuilder();
         using var process = new Process
         {
             StartInfo = startInfo
         };
+
+        process.ErrorDataReceived +=
+            (_, eventArgs) =>
+            {
+                if (eventArgs.Data is null)
+                {
+                    return;
+                }
+
+                errorOutput.AppendLine(eventArgs.Data);
+                Console.Error.WriteLine(eventArgs.Data);
+            };
 
         try
         {
@@ -218,7 +238,12 @@ internal sealed class DockerWorkerRuntime
                 exception);
         }
 
+        process.BeginErrorReadLine();
+
         await process.WaitForExitAsync();
+        process.WaitForExit();
+
+        LastErrorOutput = errorOutput.ToString();
 
         return process.ExitCode;
     }

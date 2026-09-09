@@ -106,7 +106,7 @@ public sealed class CastingWorkflow
             book,
             cancellationToken);
 
-        var existingAssignments =
+        IReadOnlyList<CastingAssignment> existingAssignments =
             existingPlan?.Assignments ??
             [];
 
@@ -127,10 +127,17 @@ public sealed class CastingWorkflow
 
         if (missingRoleIds.Length == 0)
         {
+            var activeExistingAssignments =
+                existingAssignments
+                    .Where(
+                        assignment => requiredRoleIds.Contains(
+                            assignment.CharacterId))
+                    .ToArray();
+
             validator.Validate(
                 registry,
                 voices,
-                existingAssignments);
+                activeExistingAssignments);
 
             return new CastingWorkflowResult
             {
@@ -150,10 +157,16 @@ public sealed class CastingWorkflow
             .Concat(newAssignments)
             .ToArray();
 
+        var activeAssignments = assignments
+            .Where(
+                assignment => requiredRoleIds.Contains(
+                    assignment.CharacterId))
+            .ToArray();
+
         validator.Validate(
             registry,
             voices,
-            assignments);
+            activeAssignments);
 
         var plan = new CastingPlan
         {

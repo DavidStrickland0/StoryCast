@@ -29,4 +29,9 @@ public sealed class CastingAssignment
     /// Gets a value indicating whether the assignment was manually locked.
     /// </summary>
     public bool IsLocked { get; init; }
+
+    /// <summary>
+    /// Gets the role-specific Chatterbox synthesis settings.
+    /// </summary>
+    public CastingSynthesisSettings Synthesis { get; init; } = new();
 }

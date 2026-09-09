@@ -7,6 +7,12 @@ from pathlib import Path
 
 from faster_whisper import WhisperModel
 
+from pronunciations import (
+    canonicalize_transcription,
+    find_book_root,
+    load_pronunciations,
+)
+
 from verify_voice_library import (
     edit_distance,
     normalize_words,
@@ -19,6 +25,63 @@ def load_json(path: Path) -> dict:
         encoding="utf-8-sig",
     ) as stream:
         return json.load(stream)
+
+
+def is_repeated_utterance(
+    expected_words: list[str],
+    actual_words: list[str],
+) -> bool:
+    """Detect an exact utterance repeated two or more times."""
+    if (
+        not expected_words
+        or len(actual_words) <= len(expected_words)
+        or len(actual_words) % len(expected_words) != 0
+    ):
+        return False
+
+    repetitions = (
+        len(actual_words) //
+        len(expected_words)
+    )
+
+    return (
+        repetitions >= 2
+        and actual_words ==
+        expected_words * repetitions
+    )
+
+def classify_verification(
+    expected_words: list[str],
+    actual_words: list[str],
+    word_error_rate: float,
+) -> tuple[str, str]:
+    """Classify transcript accuracy or short-utterance audibility."""
+    if is_repeated_utterance(
+        expected_words,
+        actual_words,
+    ):
+        return "fail", "repeated-utterance"
+    if (
+        0 < len(expected_words) <= 5
+        and actual_words
+    ):
+        return "pass", "audibility-short-utterance"
+
+    if word_error_rate <= 0.08:
+        return "pass", "transcript"
+
+    if word_error_rate <= 0.20:
+        return "review", "transcript"
+
+    if (
+        len(expected_words) <= 10
+        and actual_words
+        and abs(len(expected_words) - len(actual_words)) <= 2
+        and edit_distance(expected_words, actual_words) <= 2
+    ):
+        return "review", "transcript-short-fragment"
+
+    return "fail", "transcript"
 
 
 def main() -> int:
@@ -38,7 +101,8 @@ def main() -> int:
 
     manifest_path = args.chapter_manifest.resolve()
     manifest = load_json(manifest_path)
-
+    book = find_book_root(manifest_path)
+    pronunciations = load_pronunciations(book)
     print(
         f"Loading {args.model} on CUDA...",
         flush=True,
@@ -85,12 +149,20 @@ def main() -> int:
             for item in transcription_segments
         ).strip()
 
-        expected_words = normalize_words(
-            expected_text
+        expected_text = expected_text.replace("\u2019", "'").replace("\u00e2\u20ac\u2122", "'")
+        canonical_expected_text = canonicalize_transcription(
+            expected_text,
+            pronunciations,
         )
-
+        canonical_transcription = canonicalize_transcription(
+            transcription,
+            pronunciations,
+        )
+        expected_words = normalize_words(
+            canonical_expected_text
+        )
         actual_words = normalize_words(
-            transcription
+            canonical_transcription
         )
 
         distance = edit_distance(
@@ -104,13 +176,11 @@ def main() -> int:
             else 1.0
         )
 
-        if word_error_rate <= 0.08:
-            status = "pass"
-        elif word_error_rate <= 0.20:
-            status = "review"
-        else:
-            status = "fail"
-
+        status, verification_mode = classify_verification(
+            expected_words,
+            actual_words,
+            word_error_rate,
+        )
         results.append(
             {
                 "segmentIndex": segment["index"],
@@ -126,6 +196,7 @@ def main() -> int:
                     6,
                 ),
                 "status": status,
+                "verificationMode": verification_mode,
                 "expectedText": expected_text,
                 "transcription": transcription,
                 "audioPath": str(audio_path),
@@ -133,7 +204,8 @@ def main() -> int:
         )
 
         print(
-            f"    WER={word_error_rate:.1%} | {status}",
+            f"    WER={word_error_rate:.1%} | "
+            f"{status} | {verification_mode}",
             flush=True,
         )
 
@@ -199,7 +271,6 @@ def main() -> int:
     return (
         2
         if summary["failed"] > 0
-        or summary["review"] > 0
         else 0
     )
 

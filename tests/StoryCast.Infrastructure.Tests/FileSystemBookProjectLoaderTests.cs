@@ -115,4 +115,84 @@ public sealed class FileSystemBookProjectLoaderTests
             }
         }
     }
-}
+
+    /// <summary>
+    /// Verifies that newly added chapter files are discovered without
+    /// changing the book manifest.
+    /// </summary>
+    [Fact]
+    public async Task LoadAsync_DiscoversChapterAddedAfterManifest()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"storycast-book-{Guid.NewGuid():N}");
+
+        var chapters = Path.Combine(
+            root,
+            "chapters");
+
+        try
+        {
+            Directory.CreateDirectory(chapters);
+
+            await File.WriteAllTextAsync(
+                Path.Combine(
+                    chapters,
+                    "chapter-001.md"),
+                "# Chapter One\n\nFirst.");
+
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "book.json"),
+                """
+                {
+                  "schemaVersion": 1,
+                  "id": "test-book",
+                  "title": "Test Book",
+                  "author": "Test Author",
+                  "language": "en",
+                  "chapters": [
+                    "chapters/chapter-001.md"
+                  ]
+                }
+                """);
+
+            var loader =
+                new FileSystemBookProjectLoader();
+
+            var initial =
+                await loader.LoadAsync(root);
+
+            Assert.Single(
+                initial.Manuscript.Chapters);
+
+            await File.WriteAllTextAsync(
+                Path.Combine(
+                    chapters,
+                    "chapter-002.md"),
+                "# Chapter Two\n\nSecond.");
+
+            var updated =
+                await loader.LoadAsync(root);
+
+            Assert.Equal(
+                2,
+                updated.Manuscript.Chapters.Count);
+
+            Assert.Equal(
+                "chapter-002.md",
+                updated.Manuscript.Chapters[1].FileName);
+
+            Assert.Equal(
+                "chapter-002",
+                updated.Manuscript.Chapters[1].Id);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(
+                    root,
+                    recursive: true);
+            }
+        }
+    }}

@@ -100,6 +100,30 @@ public sealed class CastingAssignmentValidator
                     $"Role '{assignment.CharacterId}' has invalid " +
                     $"casting confidence {assignment.Confidence}.");
             }
+
+            if (assignment.Synthesis.Exaggeration < 0 ||
+                assignment.Synthesis.Exaggeration > 1)
+            {
+                throw new InvalidDataException(
+                    $"Role '{assignment.CharacterId}' has invalid " +
+                    $"exaggeration {assignment.Synthesis.Exaggeration}.");
+            }
+
+            if (assignment.Synthesis.CfgWeight < 0 ||
+                assignment.Synthesis.CfgWeight > 1)
+            {
+                throw new InvalidDataException(
+                    $"Role '{assignment.CharacterId}' has invalid CFG " +
+                    $"weight {assignment.Synthesis.CfgWeight}.");
+            }
+
+            if (assignment.Synthesis.Temperature <= 0 ||
+                assignment.Synthesis.Temperature > 2)
+            {
+                throw new InvalidDataException(
+                    $"Role '{assignment.CharacterId}' has invalid " +
+                    $"temperature {assignment.Synthesis.Temperature}.");
+            }
         }
 
         var missingRoleIds = requiredRoleIds

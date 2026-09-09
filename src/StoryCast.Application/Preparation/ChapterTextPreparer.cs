@@ -12,7 +12,7 @@ namespace StoryCast.Application.Preparation;
 public sealed partial class ChapterTextPreparer
     : IChapterTextPreparer
 {
-    private const string CurrentPreparationVersion = "1";
+    private const string CurrentPreparationVersion = "3";
 
     /// <inheritdoc />
     public PreparedChapter Prepare(ManuscriptChapter chapter)
@@ -61,7 +61,10 @@ public sealed partial class ChapterTextPreparer
 
     private static string PrepareMarkdown(string text)
     {
-        text = FenceMarkerRegex().Replace(text, string.Empty);
+        text = GenerationInformationFooterRegex().Replace(
+            text,
+            string.Empty);
+text = FenceMarkerRegex().Replace(text, string.Empty);
 
         text = HorizontalRuleRegex().Replace(
             text,
@@ -195,6 +198,11 @@ public sealed partial class ChapterTextPreparer
         @"(?<!\w)[*_]+|[*_]+(?!\w)",
         RegexOptions.CultureInvariant)]
     private static partial Regex EmphasisMarkerRegex();
+
+[GeneratedRegex(
+        @"(?ms)(?:^|\n)[ \t]*Generation Information[ \t]*\n.*\z",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex GenerationInformationFooterRegex();
 
     [GeneratedRegex(
         @"[ \t]+$",

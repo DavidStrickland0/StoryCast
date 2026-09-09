@@ -8,11 +8,28 @@ return await RunAsync(args);
 static async Task<int> RunAsync(string[] args)
 {
     if (args.Length >= 2 &&
+        EqualsArgument(args[0], "voices") &&
+        EqualsArgument(args[1], "refresh") &&
+        HasOption(args, "--help", "-h"))
+    {
+        VoiceRefreshCommands.WriteHelp();
+        return 0;
+    }
+    if (args.Length >= 2 &&
         EqualsArgument(args[0], "produce") &&
         EqualsArgument(args[1], "next") &&
         HasOption(args, "--help", "-h"))
     {
         IncrementalProductionCommands.WriteHelp();
+        return 0;
+    }
+
+    if (args.Length >= 2 &&
+        EqualsArgument(args[0], "produce") &&
+        EqualsArgument(args[1], "run") &&
+        HasOption(args, "--help", "-h"))
+    {
+        IncrementalProductionCommands.WriteRunHelp();
         return 0;
     }
 
@@ -22,6 +39,12 @@ static async Task<int> RunAsync(string[] args)
         return 0;
     }
 
+    if (args.Length >= 2 &&
+        EqualsArgument(args[0], "voices") &&
+        EqualsArgument(args[1], "refresh"))
+    {
+        return await VoiceRefreshCommands.RefreshAsync(args[2..]);
+    }
     if (args.Length >= 2 &&
         EqualsArgument(args[0], "voices") &&
         EqualsArgument(args[1], "list"))
@@ -77,6 +100,14 @@ static async Task<int> RunAsync(string[] args)
         EqualsArgument(args[1], "next"))
     {
         return await IncrementalProductionCommands.ProduceNextAsync(
+            args[2..]);
+    }
+
+    if (args.Length >= 2 &&
+        EqualsArgument(args[0], "produce") &&
+        EqualsArgument(args[1], "run"))
+    {
+        return await IncrementalProductionCommands.ProduceRunAsync(
             args[2..]);
     }
 
@@ -345,6 +376,7 @@ static void WriteHelp()
 
         Usage:
           storycast voices list [--library <path>]
+          storycast voices refresh [--samples <path>] [--library <path>] [--model <model>] [--worker-image <image>]
           storycast voices enrich [--library <path>]
           storycast voices analyze [--library <path>] [--output <path>]
           storycast voices verify [--library <path>] [--model <model>] [--worker-image <image>]
@@ -353,11 +385,13 @@ static void WriteHelp()
           storycast dialogue attribute <book-directory> --model <model>
           storycast cast assign <book-directory> --model <model> [--library <path>]
           storycast produce next <book-directory> --model <model> [--library <path>] [--worker-image <image>] [--whisper-model <model>]
+          storycast produce run <book-directory> --model <model> [--library <path>] [--worker-image <image>] [--whisper-model <model>]
           storycast produce chapter <book-directory> <chapter-id> [--library <path>] [--resume-run <path>] [--worker-image <image>]
           storycast produce book <book-directory> [--library <path>] [--resume-book-run <path>] [--worker-image <image>] [--chapter-pause <seconds>]
 
         Commands:
           voices list         Validate and display available voices.
+          voices refresh      Rebuild, analyze, and verify the voice library.
           voices enrich       Add metadata derived from voice directories.
           voices analyze      Measure voice-sample audio quality.
           voices verify       Verify synthesized speech with Whisper.
@@ -365,11 +399,13 @@ static void WriteHelp()
           characters discover  Discover and persist speaking characters.
           dialogue attribute    Assign every dialogue line to a character.
           cast assign         Assign verified voices to audiobook roles.
-          produce next        Process the next incomplete chapter end to end.
+          produce next        Process one next incomplete chapter end to end.
+          produce run         Process chapters continuously until caught up.
           produce chapter     Synthesize, verify, assemble, and master a chapter.
           produce book        Produce every configured chapter in order.
 
         Options:
+          --samples      Source voice-sample directory. Defaults to .\samples.
           --library      Voice-library directory. Defaults to .\voices.
           --model        Installed Ollama model used for analysis.
           --ollama-url   Ollama URL. Defaults to http://localhost:11434/.
@@ -381,10 +417,11 @@ static void WriteHelp()
           --chapter-pause     Silence between chapters. Defaults to 1.0 seconds.
 
         Incremental production:
-          produce next handles one chapter per invocation. It resumes a failed
-          chapter, preserves book-wide character identities and existing voice
-          assignments, and exits 0 without work when all current chapters are
-          complete. Use produce next --help for artifact and workflow details.
+          produce next handles exactly one chapter. produce run continues
+          chapter by chapter until all currently available chapters complete.
+          Both commands resume failed chapter runs and preserve book-wide
+          character identities and voice assignments. Use each command with
+          --help for workflow and artifact details.
           --help, -h     Display this help.
         """);
 }

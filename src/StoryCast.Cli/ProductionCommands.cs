@@ -158,15 +158,54 @@ internal static class ProductionCommands
             Console.WriteLine("Starting chapter production...");
             Console.WriteLine();
 
+            var workerScriptName =
+                Path.GetFileName(scriptPath);
+
             var exitCode = await RunWorkerAsync(
                 runtime,
-                Path.GetFileName(scriptPath),
+                workerScriptName,
                 containerBookPath,
                 runtime.LibraryPath,
                 chapterId,
                 whisperModel,
                 containerRunDirectoryPath,
                 containerResumeRunPath);
+
+            const int maximumTransientRetries = 3;
+
+            var retryResumePath =
+                containerResumeRunPath ??
+                containerRunDirectoryPath;
+
+            for (var retry = 1;
+                 exitCode != 0 &&
+                 retry <= maximumTransientRetries &&
+                 IsTransientWorkerFailure(
+                     runtime.LastErrorOutput);
+                 retry++)
+            {
+                var delay = TimeSpan.FromSeconds(
+                    retry * 5);
+
+                Console.Error.WriteLine();
+                Console.Error.WriteLine(
+                    $"Transient CUDA worker failure detected. " +
+                    $"Restarting the container in " +
+                    $"{delay.TotalSeconds:0} seconds " +
+                    $"(retry {retry}/{maximumTransientRetries}).");
+
+                await Task.Delay(delay);
+
+                exitCode = await RunWorkerAsync(
+                    runtime,
+                    workerScriptName,
+                    containerBookPath,
+                    runtime.LibraryPath,
+                    chapterId,
+                    whisperModel,
+                    runDirectoryPath: null,
+                    resumeRunPath: retryResumePath);
+            }
 
             Console.WriteLine();
 
@@ -201,6 +240,31 @@ internal static class ProductionCommands
         }
     }
 
+    private static bool IsTransientWorkerFailure(
+        string errorOutput)
+    {
+        if (string.IsNullOrWhiteSpace(errorOutput))
+        {
+            return false;
+        }
+
+        string[] markers =
+        [
+            "CUDA error:",
+            "CUDA out of memory",
+            "CUDNN_STATUS",
+            "CUBLAS_STATUS",
+            "device-side assert",
+            "kernel errors might be asynchronously reported",
+            "Synthesis failed with exit code -11"
+        ];
+
+        return markers.Any(
+            marker =>
+                errorOutput.Contains(
+                    marker,
+                    StringComparison.OrdinalIgnoreCase));
+    }
     private static Task<int> RunWorkerAsync(
         DockerWorkerRuntime runtime,
         string scriptName,

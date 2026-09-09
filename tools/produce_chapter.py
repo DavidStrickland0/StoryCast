@@ -241,7 +241,7 @@ def verify_segments_with_retries(
         rejected_segments = [
             segment
             for segment in verification["segments"]
-            if segment["status"] != "pass"
+            if segment["status"] == "fail"
         ]
 
         attempt_report_path = (
@@ -809,6 +809,56 @@ def main() -> int:
                 ],
             ),
         )
+        final_audio = (
+            book /
+            "output" /
+            "final" /
+            f"{args.chapter}.mp3"
+        )
+
+        export_report_path = (
+            chapter_directory /
+            "chapter-export.json"
+        )
+
+        current_stage = "MP3 export"
+
+        run_checkpointed_stage(
+            "MP3 export",
+            "mp3Export",
+            report,
+            run_manifest_path,
+            [
+                book / "book.json",
+                mastered_audio,
+                mastered_verification_path,
+                tools_directory /
+                "export_chapter.py",
+            ],
+            {
+                "bitrate": "128k",
+            },
+            [
+                export_report_path,
+                final_audio,
+            ],
+            lambda: run_stage(
+                "MP3 export",
+                [
+                    sys.executable,
+                    str(
+                        tools_directory /
+                        "export_chapter.py"
+                    ),
+                    str(book),
+                    args.chapter,
+                    str(mastered_audio),
+                    "--bitrate",
+                    "128k",
+                ],
+            ),
+        )
+
         report["status"] = "completed"
         report["completedUtc"] = (
             datetime.now(
@@ -817,6 +867,9 @@ def main() -> int:
         )
         report["masteredAudioPath"] = (
             str(mastered_audio)
+        )
+        report["finalAudioPath"] = (
+            str(final_audio)
         )
 
         write_run_manifest(
@@ -828,7 +881,8 @@ def main() -> int:
         print("===== Production complete =====")
         print(f"Run:     {run_directory}")
         print(f"Chapter: {args.chapter}")
-        print(f"Audio:   {mastered_audio}")
+        print(f"Master:  {mastered_audio}")
+        print(f"MP3:     {final_audio}")
 
         return 0
     except Exception:

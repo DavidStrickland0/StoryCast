@@ -121,40 +121,143 @@ public sealed class DialogueAttributionService
             dialogueSegments.Select(segment => segment.Index).ToArray(),
             registry.Characters.Select(character => character.Id).ToArray());
 
-        var responseText = await generator.GenerateAsync(
-            SystemPrompt,
-            userPrompt,
-            schema,
-            cancellationToken);
+        var expectedIndexes = dialogueSegments
+            .Select(segment => segment.Index)
+            .ToHashSet();
 
-        DialogueAttributionResponse response;
+        const int maximumAttempts = 3;
+        string? validationError = null;
 
-        try
+        for (var attempt = 1;
+             attempt <= maximumAttempts;
+             attempt++)
         {
-            response =
-                JsonSerializer.Deserialize<DialogueAttributionResponse>(
-                    responseText,
-                    SerializerOptions) ??
-                throw new InvalidDataException(
-                    "Dialogue attribution returned an empty document.");
-        }
-        catch (JsonException exception)
-        {
-            throw new InvalidDataException(
-                "Dialogue attribution returned invalid JSON.",
-                exception);
-        }
+            var attemptPrompt = validationError is null
+                ? userPrompt
+                : $"""
+                  {userPrompt}
 
-        return response.Assignments.Select(
-            assignment => new DialogueAssignment
+                  The previous response was rejected:
+                  {validationError}
+
+                  Return a corrected document. Assign every supplied
+                  dialogue segment exactly once. Do not repeat, omit,
+                  or invent segment indexes.
+                  """;
+
+            var responseText = await generator.GenerateAsync(
+                SystemPrompt,
+                attemptPrompt,
+                schema,
+                cancellationToken);
+
+            DialogueAttributionResponse response;
+
+            try
             {
-                SegmentIndex = assignment.SegmentIndex,
-                SpeakerId = assignment.SpeakerId,
-                Confidence = assignment.Confidence,
-                Delivery = assignment.Delivery,
-                Rationale = assignment.Rationale
-            }).ToArray();
-    }
+                response =
+                    JsonSerializer.Deserialize<
+                        DialogueAttributionResponse>(
+                            responseText,
+                            SerializerOptions) ??
+                    throw new InvalidDataException(
+                        "Dialogue attribution returned an empty document.");
+            }
+            catch (JsonException exception)
+            {
+                validationError =
+                    "Dialogue attribution returned invalid JSON: " +
+                    exception.Message;
+
+                if (attempt < maximumAttempts)
+                {
+                    continue;
+                }
+
+                throw new InvalidDataException(
+                    $"Dialogue attribution remained invalid after " +
+                    $"{maximumAttempts} attempts: {validationError}",
+                    exception);
+            }
+
+            var returnedIndexes = response.Assignments
+                .Select(assignment => assignment.SegmentIndex)
+                .ToArray();
+
+            var duplicateIndexes = returnedIndexes
+                .GroupBy(index => index)
+                .Where(group => group.Count() > 1)
+                .Select(group => group.Key)
+                .Order()
+                .ToArray();
+
+            var missingIndexes = expectedIndexes
+                .Except(returnedIndexes)
+                .Order()
+                .ToArray();
+
+            var unexpectedIndexes = returnedIndexes
+                .Except(expectedIndexes)
+                .Distinct()
+                .Order()
+                .ToArray();
+
+            if (duplicateIndexes.Length == 0 &&
+                missingIndexes.Length == 0 &&
+                unexpectedIndexes.Length == 0 &&
+                returnedIndexes.Length == expectedIndexes.Count)
+            {
+                return response.Assignments
+                    .OrderBy(assignment => assignment.SegmentIndex)
+                    .Select(
+                        assignment => new DialogueAssignment
+                        {
+                            SegmentIndex = assignment.SegmentIndex,
+                            SpeakerId = assignment.SpeakerId,
+                            Confidence = assignment.Confidence,
+                            Delivery = assignment.Delivery.Trim(),
+                            Rationale = assignment.Rationale.Trim()
+                        })
+                    .ToArray();
+            }
+
+            var problems = new List<string>();
+
+            if (duplicateIndexes.Length > 0)
+            {
+                problems.Add(
+                    $"duplicate segment indexes: " +
+                    $"{string.Join(", ", duplicateIndexes)}");
+            }
+
+            if (missingIndexes.Length > 0)
+            {
+                problems.Add(
+                    $"missing segment indexes: " +
+                    $"{string.Join(", ", missingIndexes)}");
+            }
+
+            if (unexpectedIndexes.Length > 0)
+            {
+                problems.Add(
+                    $"unexpected segment indexes: " +
+                    $"{string.Join(", ", unexpectedIndexes)}");
+            }
+
+            validationError = string.Join(
+                "; ",
+                problems);
+
+            if (attempt == maximumAttempts)
+            {
+                throw new InvalidDataException(
+                    $"Dialogue attribution remained invalid after " +
+                    $"{maximumAttempts} attempts: {validationError}.");
+            }
+        }
+
+        throw new InvalidDataException(
+            "Dialogue attribution failed without returning assignments.");    }
 
     private static JsonElement CreateResponseSchema(
         IReadOnlyList<int> dialogueIndexes,

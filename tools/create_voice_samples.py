@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -111,17 +112,14 @@ def require_ffmpeg() -> str:
 
 
 def create_voice_id(source: Path) -> str:
-    value = source.stem.strip().lower()
-    value = re.sub(r"[^a-z0-9]+", "-", value)
-    value = value.strip("-")
+    """Create a neutral, stable identifier from the source audio bytes."""
+    digest = hashlib.sha256()
 
-    if not value:
-        raise ValueError(
-            f"Could not create a voice ID from filename: {source.name}"
-        )
+    with source.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
 
-    return value
-
+    return f"voice-{digest.hexdigest()[:16]}"
 
 def prepare_reference(
     ffmpeg: str,

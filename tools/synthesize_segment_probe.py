@@ -12,9 +12,36 @@ import torchaudio
 from chatterbox.tts import ChatterboxTTS
 
 
-EXAGGERATION = 0.5
-CFG_WEIGHT = 0.5
-TEMPERATURE = 0.7
+DEFAULT_NARRATOR_EXAGGERATION = 0.4
+DEFAULT_CHARACTER_EXAGGERATION = 0.65
+DEFAULT_CFG_WEIGHT = 0.5
+DEFAULT_TEMPERATURE = 0.7
+
+
+def resolve_synthesis_settings(
+    assignment: dict,
+    speaker_id: str,
+) -> dict[str, float]:
+    """Resolve role-specific Chatterbox settings."""
+    configured = assignment.get("synthesis") or {}
+
+    default_exaggeration = (
+        DEFAULT_NARRATOR_EXAGGERATION
+        if speaker_id.lower() == "narrator"
+        else DEFAULT_CHARACTER_EXAGGERATION
+    )
+
+    return {
+        "exaggeration": float(
+            configured.get("exaggeration", default_exaggeration)
+        ),
+        "cfgWeight": float(
+            configured.get("cfgWeight", DEFAULT_CFG_WEIGHT)
+        ),
+        "temperature": float(
+            configured.get("temperature", DEFAULT_TEMPERATURE)
+        ),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,6 +178,10 @@ def main() -> int:
 
     assignment = matching_assignments[0]
     voice_id = assignment["voiceId"]
+    synthesis_settings = resolve_synthesis_settings(
+        assignment,
+        speaker_id,
+    )
 
     voice_sample = find_voice_sample(
         library,
@@ -205,9 +236,9 @@ def main() -> int:
         audio = model.generate(
             segment["sourceText"],
             audio_prompt_path=str(voice_sample),
-            exaggeration=EXAGGERATION,
-            cfg_weight=CFG_WEIGHT,
-            temperature=TEMPERATURE,
+            exaggeration=synthesis_settings["exaggeration"],
+            cfg_weight=synthesis_settings["cfgWeight"],
+            temperature=synthesis_settings["temperature"],
         )
 
     audio = audio.detach().to(
@@ -231,6 +262,7 @@ def main() -> int:
         "segmentIndex": args.segment,
         "speakerId": speaker_id,
         "voiceId": voice_id,
+        "synthesis": synthesis_settings,
         "sourceText": segment["sourceText"],
         "sampleRate": model.sr,
         "durationSeconds": duration_seconds,

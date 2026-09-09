@@ -52,7 +52,7 @@ public sealed class ChapterTextPreparerTests
             prepared.SpokenText);
 
         Assert.Equal(64, prepared.SourceSha256.Length);
-        Assert.Equal("1", prepared.PreparationVersion);
+        Assert.Equal("3", prepared.PreparationVersion);
     }
 
     /// <summary>
@@ -103,5 +103,42 @@ public sealed class ChapterTextPreparerTests
 
         Assert.Equal(first.SourceSha256, second.SourceSha256);
         Assert.Equal(first.SpokenText, second.SpokenText);
+    }
+    /// <summary>
+    /// Verifies that trailing generator metadata is not spoken.
+    /// </summary>
+    [Fact]
+    public void Prepare_RemovesTrailingGenerationInformation()
+    {
+        var chapter = new ManuscriptChapter
+        {
+            Id = "chapter-002",
+            Index = 1,
+            FileName = "chapter-002.md",
+            SourcePath = @"C:\Book\chapter-002.md",
+            Format = ManuscriptFormat.Markdown,
+            RawText =
+                """
+                # Chapter Two
+
+                The survivors escaped into the rain.
+
+                Generation Information
+
+                Model: qwen3.5:4b
+                GPU: Test GPU
+                Total Generation Time: 00:00:28
+                """
+        };
+
+        var prepared =
+            new ChapterTextPreparer().Prepare(chapter);
+
+        Assert.Equal(
+            "Chapter Two\n\n" +
+            "The survivors escaped into the rain.",
+            prepared.SpokenText);
+
+        Assert.Equal("3", prepared.PreparationVersion);
     }
 }

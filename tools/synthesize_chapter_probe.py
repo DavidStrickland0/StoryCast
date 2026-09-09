@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,10 +10,195 @@ from pathlib import Path
 import torch
 import torchaudio
 
+from pronunciations import (
+    apply_pronunciations,
+    load_pronunciations,
+    pronunciation_fingerprint,
+)
 
-EXAGGERATION = 0.5
-CFG_WEIGHT = 0.5
-TEMPERATURE = 0.7
+
+DEFAULT_NARRATOR_EXAGGERATION = 0.4
+DEFAULT_CHARACTER_EXAGGERATION = 0.65
+DEFAULT_CFG_WEIGHT = 0.5
+DEFAULT_TEMPERATURE = 0.7
+MAX_SYNTHESIS_CHARACTERS = 280
+CHUNK_PAUSE_SECONDS = 0.12
+HEADING_PAUSE_SECONDS = 1.25
+
+
+def split_synthesis_text(
+    text: str,
+    max_characters: int = MAX_SYNTHESIS_CHARACTERS,
+) -> list[str]:
+    if max_characters < 1:
+        raise ValueError(
+            "Maximum synthesis characters must be positive."
+        )
+
+    if len(text) <= max_characters:
+        return [text.strip()]
+
+    chunks: list[str] = []
+    cursor = 0
+
+    while cursor < len(text):
+        remaining = text[cursor:]
+
+        if len(remaining) <= max_characters:
+            chunk = remaining
+            cursor = len(text)
+        else:
+            window = text[
+                cursor:cursor + max_characters
+            ]
+
+            sentence_matches = list(
+                re.finditer(
+                    r'[.!?]["”’]?\s+',
+                    window,
+                )
+            )
+
+            minimum_boundary = max_characters // 2
+
+            sentence_end = next(
+                (
+                    match.end()
+                    for match in reversed(
+                        sentence_matches
+                    )
+                    if match.end() >= minimum_boundary
+                ),
+                None,
+            )
+
+            if sentence_end is not None:
+                end = cursor + sentence_end
+            else:
+                whitespace = window.rfind(
+                    " ",
+                    minimum_boundary,
+                )
+
+                end = (
+                    cursor + whitespace + 1
+                    if whitespace >= minimum_boundary
+                    else cursor + max_characters
+                )
+
+            chunk = text[cursor:end]
+            cursor = end
+
+        normalized = chunk.strip()
+
+        if normalized:
+            chunks.append(normalized)
+
+    return chunks
+
+
+
+def load_markdown_headings(
+    book: Path,
+    chapter_id: str,
+) -> set[str]:
+    """Load spoken headings from the chapter Markdown."""
+    manifest = load_json(book / "book.json")
+    chapter_path: Path | None = None
+
+    for chapter_value in manifest["chapters"]:
+        candidate = (book / str(chapter_value)).resolve()
+
+        if candidate.stem.lower() == chapter_id.lower():
+            chapter_path = candidate
+            break
+
+    if chapter_path is None or not chapter_path.is_file():
+        return set()
+
+    headings: set[str] = set()
+
+    with chapter_path.open(
+        "r",
+        encoding="utf-8-sig",
+    ) as stream:
+        for line in stream:
+            match = re.match(
+                r"^[ \t]{0,3}#{1,6}[ \t]+"
+                r"(.+?)[ \t]*#*[ \t]*$",
+                line.rstrip("\r\n"),
+            )
+
+            if match:
+                headings.add(match.group(1).strip())
+
+    return headings
+
+
+def split_synthesis_units(
+    text: str,
+    headings: set[str],
+) -> list[tuple[str, float]]:
+    """Split text and assign longer pauses after headings."""
+    units: list[tuple[str, float]] = []
+    ordinary_lines: list[str] = []
+
+    def flush_ordinary() -> None:
+        ordinary_text = "\n".join(ordinary_lines).strip()
+        ordinary_lines.clear()
+
+        if not ordinary_text:
+            return
+
+        for chunk in split_synthesis_text(ordinary_text):
+            units.append((chunk, CHUNK_PAUSE_SECONDS))
+
+    for line in text.splitlines():
+        stripped = line.strip()
+
+        if stripped and stripped in headings:
+            flush_ordinary()
+            units.append((stripped, HEADING_PAUSE_SECONDS))
+        else:
+            ordinary_lines.append(line)
+
+    flush_ordinary()
+    return units
+
+
+def resolve_synthesis_settings(
+    assignment: dict,
+    speaker_id: str,
+) -> dict[str, float]:
+    """Resolve role settings with backward-compatible defaults."""
+    configured = assignment.get("synthesis") or {}
+
+    default_exaggeration = (
+        DEFAULT_NARRATOR_EXAGGERATION
+        if speaker_id.lower() == "narrator"
+        else DEFAULT_CHARACTER_EXAGGERATION
+    )
+
+    return {
+        "exaggeration": float(
+            configured.get(
+                "exaggeration",
+                default_exaggeration,
+            )
+        ),
+        "cfgWeight": float(
+            configured.get(
+                "cfgWeight",
+                DEFAULT_CFG_WEIGHT,
+            )
+        ),
+        "temperature": float(
+            configured.get(
+                "temperature",
+                DEFAULT_TEMPERATURE,
+            )
+        ),
+    }
 
 
 def load_json(path: Path) -> dict:
@@ -141,6 +327,8 @@ def main() -> int:
     args = parser.parse_args()
 
     book = args.book.resolve()
+
+    pronunciations = load_pronunciations(book)
     library = args.voice_library.resolve()
 
     casting = load_json(
@@ -156,12 +344,17 @@ def main() -> int:
 
     assignments = {
         assignment["characterId"].lower():
-            assignment["voiceId"]
+            assignment
         for assignment in casting["assignments"]
     }
 
     voice_samples = load_voice_samples(
         library
+    )
+
+    markdown_headings = load_markdown_headings(
+        book,
+        args.chapter,
     )
 
     segments = artifact["script"]["segments"]
@@ -263,9 +456,7 @@ def main() -> int:
         "preparationVersion":
             artifact["preparationVersion"],
         "settings": {
-            "exaggeration": EXAGGERATION,
-            "cfgWeight": CFG_WEIGHT,
-            "temperature": TEMPERATURE,
+            "source": "casting",
         },
         "segments": [],
     }
@@ -317,8 +508,21 @@ def main() -> int:
         for segment in segments:
             segment_index = segment["index"]
             speaker_id = segment["speakerId"]
-            voice_id = assignments.get(
+            casting_assignment = assignments.get(
                 speaker_id.lower()
+            )
+            voice_id = (
+                casting_assignment["voiceId"]
+                if casting_assignment is not None
+                else None
+            )
+            synthesis_settings = (
+                resolve_synthesis_settings(
+                    casting_assignment,
+                    speaker_id,
+                )
+                if casting_assignment is not None
+                else None
             )
             existing = existing_by_index.get(
                 segment_index
@@ -327,6 +531,19 @@ def main() -> int:
                 chapter_directory /
                 f"segment-{segment_index:04d}.wav"
             ).resolve()
+
+            segment_pronunciation_fingerprint = (
+
+                pronunciation_fingerprint(
+
+                    segment["sourceText"],
+
+                    pronunciations,
+
+                )
+
+            )
+
 
             reusable = (
                 existing is not None and
@@ -337,6 +554,16 @@ def main() -> int:
                     speaker_id and
                 existing.get("voiceId") ==
                     voice_id and
+                existing.get("synthesis") ==
+                    synthesis_settings and
+                existing.get(
+                    "pronunciationFingerprint",
+                    pronunciation_fingerprint(
+                        segment["sourceText"],
+                        [],
+                    ),
+                ) ==
+                    segment_pronunciation_fingerprint and
                 existing.get("sourceText") ==
                     segment["sourceText"] and
                 existing.get("attempt") == 0 and
@@ -353,6 +580,19 @@ def main() -> int:
                     audio_info = torchaudio.info(
                         str(expected_audio_path)
                     )
+
+                    segment_pronunciation_fingerprint = (
+
+                        pronunciation_fingerprint(
+
+                            segment["sourceText"],
+
+                            pronunciations,
+
+                        )
+
+                    )
+
 
                     reusable = (
                         audio_info.num_frames > 0 and
@@ -418,15 +658,21 @@ def main() -> int:
                 f"Segment {segment_index} contains only whitespace."
             )
 
-        voice_id = assignments.get(
+        casting_assignment = assignments.get(
             speaker_id.lower()
         )
 
-        if voice_id is None:
+        if casting_assignment is None:
             raise RuntimeError(
                 f"No casting assignment exists for "
                 f"speaker '{speaker_id}'."
             )
+
+        voice_id = casting_assignment["voiceId"]
+        synthesis_settings = resolve_synthesis_settings(
+            casting_assignment,
+            speaker_id,
+        )
 
         voice_sample = voice_samples.get(
             voice_id.lower()
@@ -440,14 +686,14 @@ def main() -> int:
 
         seed = (
             10000 +
-            segment_index +
+            segment_index * 1000 +
             args.attempt * 100000
         )
 
-        torch.manual_seed(seed)
-
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        synthesis_units = split_synthesis_units(
+            source_text,
+            markdown_headings,
+        )
 
         output_path = (
             chapter_directory /
@@ -462,22 +708,83 @@ def main() -> int:
         print(
             f"[{position}/{len(segments)}] "
             f"segment {segment_index} | "
-            f"{speaker_id} | {voice_id}",
+            f"{speaker_id} | {voice_id} | "
+            f"{len(synthesis_units)} chunks",
             flush=True,
         )
 
-        with torch.inference_mode():
-            audio = model.generate(
-                source_text,
-                audio_prompt_path=str(voice_sample),
-                exaggeration=EXAGGERATION,
-                cfg_weight=CFG_WEIGHT,
-                temperature=TEMPERATURE,
+        generated_chunks: list[torch.Tensor] = []
+
+        for chunk_index, synthesis_unit in enumerate(
+            synthesis_units
+        ):
+            chunk_text, pause_after_seconds = synthesis_unit
+            chunk_seed = seed + chunk_index
+
+            print(
+                f"  chunk {chunk_index + 1}/"
+                f"{len(synthesis_units)} | "
+                f"{len(chunk_text)} characters",
+                flush=True,
+            )
+            torch.manual_seed(chunk_seed)
+
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(
+                    chunk_seed
+                )
+
+            with torch.inference_mode():
+                generated_audio = model.generate(
+                    apply_pronunciations(
+                        chunk_text,
+                        pronunciations,
+                    ),
+                    audio_prompt_path=str(voice_sample),
+                    exaggeration=
+                        synthesis_settings["exaggeration"],
+                    cfg_weight=
+                        synthesis_settings["cfgWeight"],
+                    temperature=
+                        synthesis_settings["temperature"],
+                )
+
+            chunk_audio = generated_audio.detach().to(
+                device="cpu",
+                dtype=torch.float32,
             )
 
-        audio = audio.detach().to(
-            device="cpu",
-            dtype=torch.float32,
+            del generated_audio
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+
+            generated_chunks.append(
+                chunk_audio
+            )
+
+            if chunk_index + 1 < len(
+                synthesis_units
+            ):
+                pause_frames = int(
+                    model.sr *
+                    pause_after_seconds
+                )
+
+                generated_chunks.append(
+                    torch.zeros(
+                        (
+                            *chunk_audio.shape[:-1],
+                            pause_frames,
+                        ),
+                        dtype=chunk_audio.dtype,
+                    )
+                )
+
+        audio = torch.cat(
+            generated_chunks,
+            dim=-1,
         )
 
         torchaudio.save(
@@ -501,7 +808,13 @@ def main() -> int:
                 "kind": segment["kind"],
                 "speakerId": speaker_id,
                 "voiceId": voice_id,
+                "synthesis": synthesis_settings,
                 "sourceText": source_text,
+                "pronunciationFingerprint":
+                    pronunciation_fingerprint(
+                        source_text,
+                        pronunciations,
+                    ),
                 "delivery": segment.get(
                     "delivery",
                     "",
