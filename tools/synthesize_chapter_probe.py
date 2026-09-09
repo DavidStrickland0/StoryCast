@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 import torchaudio
 
+from prosody import resolve_segment_synthesis_settings
 from pronunciations import (
     apply_pronunciations,
     load_pronunciations,
@@ -169,36 +170,16 @@ def split_synthesis_units(
 def resolve_synthesis_settings(
     assignment: dict,
     speaker_id: str,
-) -> dict[str, float]:
-    """Resolve role settings with backward-compatible defaults."""
-    configured = assignment.get("synthesis") or {}
-
-    default_exaggeration = (
-        DEFAULT_NARRATOR_EXAGGERATION
-        if speaker_id.lower() == "narrator"
-        else DEFAULT_CHARACTER_EXAGGERATION
+    source_text: str,
+    delivery: str = "",
+) -> dict[str, float | str]:
+    """Resolve prose-aware settings from the casting baseline."""
+    return resolve_segment_synthesis_settings(
+        assignment,
+        speaker_id,
+        source_text,
+        delivery,
     )
-
-    return {
-        "exaggeration": float(
-            configured.get(
-                "exaggeration",
-                default_exaggeration,
-            )
-        ),
-        "cfgWeight": float(
-            configured.get(
-                "cfgWeight",
-                DEFAULT_CFG_WEIGHT,
-            )
-        ),
-        "temperature": float(
-            configured.get(
-                "temperature",
-                DEFAULT_TEMPERATURE,
-            )
-        ),
-    }
 
 
 def load_json(path: Path) -> dict:
@@ -520,6 +501,8 @@ def main() -> int:
                 resolve_synthesis_settings(
                     casting_assignment,
                     speaker_id,
+                    segment["sourceText"],
+                    segment.get("delivery", ""),
                 )
                 if casting_assignment is not None
                 else None
@@ -670,9 +653,11 @@ def main() -> int:
 
         voice_id = casting_assignment["voiceId"]
         synthesis_settings = resolve_synthesis_settings(
-            casting_assignment,
-            speaker_id,
-        )
+                    casting_assignment,
+                    speaker_id,
+                    segment["sourceText"],
+                    segment.get("delivery", ""),
+                )
 
         voice_sample = voice_samples.get(
             voice_id.lower()
