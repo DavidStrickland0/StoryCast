@@ -19,6 +19,8 @@ public sealed class OllamaStructuredTextGenerator
 
     private readonly HttpClient httpClient;
     private readonly string model;
+    private readonly int? contextLength;
+    private readonly int? maximumOutputTokens;
 
     /// <summary>
     /// Initializes an Ollama structured-output generator.
@@ -27,9 +29,13 @@ public sealed class OllamaStructuredTextGenerator
     /// An HTTP client whose base address points to the Ollama server.
     /// </param>
     /// <param name="model">The installed Ollama model name.</param>
+    /// <param name="contextLength">Optional context-window token limit.</param>
+    /// <param name="maximumOutputTokens">Optional output token limit.</param>
     public OllamaStructuredTextGenerator(
         HttpClient httpClient,
-        string model)
+        string model,
+        int? contextLength = null,
+        int? maximumOutputTokens = null)
     {
         this.httpClient =
             httpClient ??
@@ -37,6 +43,8 @@ public sealed class OllamaStructuredTextGenerator
 
         ArgumentException.ThrowIfNullOrWhiteSpace(model);
         this.model = model;
+        this.contextLength = contextLength;
+        this.maximumOutputTokens = maximumOutputTokens;
     }
 
     /// <inheritdoc />
@@ -59,7 +67,9 @@ public sealed class OllamaStructuredTextGenerator
             Think = false,
             Options = new GenerationOptions
             {
-                Temperature = 0
+                Temperature = 0,
+                ContextLength = contextLength,
+                MaximumOutputTokens = maximumOutputTokens
             }
         };
 
@@ -115,6 +125,14 @@ public sealed class OllamaStructuredTextGenerator
     private sealed class GenerationOptions
     {
         public double Temperature { get; init; }
+
+        [JsonPropertyName("num_ctx")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? ContextLength { get; init; }
+
+        [JsonPropertyName("num_predict")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? MaximumOutputTokens { get; init; }
     }
 
     private sealed class GenerateResponse

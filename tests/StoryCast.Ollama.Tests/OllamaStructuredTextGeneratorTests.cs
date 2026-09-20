@@ -45,7 +45,9 @@ public sealed class OllamaStructuredTextGeneratorTests
 
         var generator = new OllamaStructuredTextGenerator(
             httpClient,
-            "test-model");
+            "test-model",
+            contextLength: 32768,
+            maximumOutputTokens: 4096);
 
         using var schemaDocument = JsonDocument.Parse(
             """
@@ -72,6 +74,10 @@ public sealed class OllamaStructuredTextGeneratorTests
             result);
 
         Assert.NotNull(capturedRequest);
+        using var requestDocument = JsonDocument.Parse(capturedRequest);
+        var options = requestDocument.RootElement.GetProperty("options");
+        Assert.Equal(32768, options.GetProperty("num_ctx").GetInt32());
+        Assert.Equal(4096, options.GetProperty("num_predict").GetInt32());
         Assert.Contains(
             "\"model\":\"test-model\"",
             capturedRequest,

@@ -95,7 +95,9 @@ internal static class DialogueCommands
             var generator =
                 new OllamaStructuredTextGenerator(
                     httpClient,
-                    model);
+                    model,
+                contextLength: 32768,
+                maximumOutputTokens: 4096);
 
             var workflow =
                 new DialogueAttributionWorkflow(
@@ -147,7 +149,8 @@ internal static class DialogueCommands
             return 0;
         }
         catch (Exception exception) when (
-            exception is IOException or
+            exception is InvalidDataException or
+            IOException or
             HttpRequestException or
             UnauthorizedAccessException or
             UriFormatException)

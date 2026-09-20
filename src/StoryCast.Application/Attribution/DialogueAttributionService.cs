@@ -11,11 +11,15 @@ namespace StoryCast.Application.Attribution;
 public sealed class DialogueAttributionService
     : IDialogueAttributionService
 {
+    private const int MaximumBatchSize = 8;
+    private const int MaximumAttempts = 3;
+
     private const string SystemPrompt =
         """
         You assign speakers to dialogue for multi-voice audiobook production.
 
-        Every supplied dialogue segment must be assigned exactly once.
+        Assign only the requested batch indexes, each exactly once.
+        Other chapter segments are context, not assignment targets.
         Use only character IDs included in the supplied character registry.
         Use dialogue tags, nearby narration, conversational order, names,
         aliases, pronouns, roles, and preceding exchanges as evidence.
@@ -64,6 +68,7 @@ public sealed class DialogueAttributionService
     {
         ArgumentNullException.ThrowIfNull(script);
         ArgumentNullException.ThrowIfNull(registry);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var dialogueSegments = script.Segments
             .Where(segment => segment.Kind == SegmentKind.Dialogue)
@@ -117,147 +122,117 @@ public sealed class DialogueAttributionService
                 SerializerOptions)}
             """;
 
-        var schema = CreateResponseSchema(
-            dialogueSegments.Select(segment => segment.Index).ToArray(),
-            registry.Characters.Select(character => character.Id).ToArray());
-
-        var expectedIndexes = dialogueSegments
-            .Select(segment => segment.Index)
-            .ToHashSet();
-
-        const int maximumAttempts = 3;
-        string? validationError = null;
-
-        for (var attempt = 1;
-             attempt <= maximumAttempts;
-             attempt++)
+        var batches = dialogueSegments.Chunk(MaximumBatchSize).ToArray();
+        var characterIds = registry.Characters.Select(character => character.Id).ToArray();
+        var assignments = new List<DialogueAssignment>(dialogueSegments.Length);
+        for (var batchIndex = 0; batchIndex < batches.Length; batchIndex++)
         {
-            var attemptPrompt = validationError is null
-                ? userPrompt
-                : $"""
-                  {userPrompt}
+            cancellationToken.ThrowIfCancellationRequested();
+            var indexes = batches[batchIndex].Select(segment => segment.Index).ToArray();
+            var batchPrompt = $"""
+                {userPrompt}
 
-                  The previous response was rejected:
-                  {validationError}
+                Assign ONLY these dialogue indexes in this batch:
+                {string.Join(", ", indexes)}
 
-                  Return a corrected document. Assign every supplied
-                  dialogue segment exactly once. Do not repeat, omit,
-                  or invent segment indexes.
-                  """;
+                Return exactly {indexes.Length} assignments. The full ordered chapter above
+                is context for speaker identity and conversational continuity. Do not
+                return assignments for any other segment.
+                """;
+            var label = $"Chapter {script.ChapterId}, batch {batchIndex + 1} of {batches.Length}";
+            assignments.AddRange(await AttributeBatchAsync(
+                batchPrompt, indexes, characterIds, label, cancellationToken));
+            Console.WriteLine($"Dialogue attribution: {label} complete ({assignments.Count}/{dialogueSegments.Length} lines).");
+        }
 
+        return assignments.OrderBy(assignment => assignment.SegmentIndex).ToArray();
+    }
+
+    private async Task<IReadOnlyList<DialogueAssignment>> AttributeBatchAsync(
+        string userPrompt,
+        IReadOnlyList<int> indexes,
+        IReadOnlyList<string> characterIds,
+        string label,
+        CancellationToken cancellationToken)
+    {
+        var schema = CreateResponseSchema(indexes, characterIds);
+        Exception? finalFailure = null;
+        for (var attempt = 1; attempt <= MaximumAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Console.WriteLine($"Dialogue attribution: {label}, attempt {attempt} of {MaximumAttempts}...");
+            var attemptPrompt = finalFailure is null ? userPrompt : $"""
+                {userPrompt}
+
+                The previous response was rejected: {finalFailure.Message}
+                Return a complete corrected JSON document for this batch only.
+                Do not repeat, omit, or invent segment indexes. Keep rationales brief.
+                """;
             var responseText = await generator.GenerateAsync(
-                SystemPrompt,
-                attemptPrompt,
-                schema,
-                cancellationToken);
-
-            DialogueAttributionResponse response;
-
+                SystemPrompt, attemptPrompt, schema, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                response =
-                    JsonSerializer.Deserialize<
-                        DialogueAttributionResponse>(
-                            responseText,
-                            SerializerOptions) ??
-                    throw new InvalidDataException(
-                        "Dialogue attribution returned an empty document.");
+                var response = JsonSerializer.Deserialize<DialogueAttributionResponse>(
+                    responseText, SerializerOptions)
+                    ?? throw new InvalidDataException("Dialogue attribution returned an empty document.");
+                return ValidateBatch(response, indexes, characterIds);
             }
-            catch (JsonException exception)
+            catch (Exception exception) when (exception is JsonException or InvalidDataException)
             {
-                validationError =
-                    "Dialogue attribution returned invalid JSON: " +
-                    exception.Message;
-
-                if (attempt < maximumAttempts)
-                {
-                    continue;
-                }
-
-                throw new InvalidDataException(
-                    $"Dialogue attribution remained invalid after " +
-                    $"{maximumAttempts} attempts: {validationError}",
-                    exception);
-            }
-
-            var returnedIndexes = response.Assignments
-                .Select(assignment => assignment.SegmentIndex)
-                .ToArray();
-
-            var duplicateIndexes = returnedIndexes
-                .GroupBy(index => index)
-                .Where(group => group.Count() > 1)
-                .Select(group => group.Key)
-                .Order()
-                .ToArray();
-
-            var missingIndexes = expectedIndexes
-                .Except(returnedIndexes)
-                .Order()
-                .ToArray();
-
-            var unexpectedIndexes = returnedIndexes
-                .Except(expectedIndexes)
-                .Distinct()
-                .Order()
-                .ToArray();
-
-            if (duplicateIndexes.Length == 0 &&
-                missingIndexes.Length == 0 &&
-                unexpectedIndexes.Length == 0 &&
-                returnedIndexes.Length == expectedIndexes.Count)
-            {
-                return response.Assignments
-                    .OrderBy(assignment => assignment.SegmentIndex)
-                    .Select(
-                        assignment => new DialogueAssignment
-                        {
-                            SegmentIndex = assignment.SegmentIndex,
-                            SpeakerId = assignment.SpeakerId,
-                            Confidence = assignment.Confidence,
-                            Delivery = assignment.Delivery.Trim(),
-                            Rationale = assignment.Rationale.Trim()
-                        })
-                    .ToArray();
-            }
-
-            var problems = new List<string>();
-
-            if (duplicateIndexes.Length > 0)
-            {
-                problems.Add(
-                    $"duplicate segment indexes: " +
-                    $"{string.Join(", ", duplicateIndexes)}");
-            }
-
-            if (missingIndexes.Length > 0)
-            {
-                problems.Add(
-                    $"missing segment indexes: " +
-                    $"{string.Join(", ", missingIndexes)}");
-            }
-
-            if (unexpectedIndexes.Length > 0)
-            {
-                problems.Add(
-                    $"unexpected segment indexes: " +
-                    $"{string.Join(", ", unexpectedIndexes)}");
-            }
-
-            validationError = string.Join(
-                "; ",
-                problems);
-
-            if (attempt == maximumAttempts)
-            {
-                throw new InvalidDataException(
-                    $"Dialogue attribution remained invalid after " +
-                    $"{maximumAttempts} attempts: {validationError}.");
+                finalFailure = exception;
+                Console.WriteLine($"Dialogue attribution: {label}, attempt {attempt} rejected: {exception.Message}");
             }
         }
 
         throw new InvalidDataException(
-            "Dialogue attribution failed without returning assignments.");    }
+            $"Dialogue attribution remained invalid after {MaximumAttempts} attempts " +
+            $"for {label}, indexes {string.Join(", ", indexes)}. Final failure: {finalFailure?.Message}",
+            finalFailure);
+    }
+
+    private static IReadOnlyList<DialogueAssignment> ValidateBatch(
+        DialogueAttributionResponse response,
+        IReadOnlyList<int> expectedIndexes,
+        IReadOnlyList<string> characterIds)
+    {
+        if (response.Assignments is null || response.Assignments.Any(assignment => assignment is null))
+        {
+            throw new InvalidDataException("Dialogue attribution returned null assignments.");
+        }
+
+        var returnedIndexes = response.Assignments.Select(assignment => assignment.SegmentIndex).ToArray();
+        if (returnedIndexes.Length != expectedIndexes.Count ||
+            returnedIndexes.Distinct().Count() != returnedIndexes.Length ||
+            !returnedIndexes.ToHashSet().SetEquals(expectedIndexes))
+        {
+            throw new InvalidDataException(
+                $"Expected each index exactly once: {string.Join(", ", expectedIndexes)}. " +
+                $"Received: {string.Join(", ", returnedIndexes)}.");
+        }
+
+        foreach (var assignment in response.Assignments)
+        {
+            if (!characterIds.Contains(assignment.SpeakerId, StringComparer.OrdinalIgnoreCase) ||
+                assignment.Confidence < 0 || assignment.Confidence > 1 ||
+                assignment.Delivery is null || assignment.Rationale is null ||
+                assignment.Delivery.Length > 80 || assignment.Rationale.Length > 300)
+            {
+                throw new InvalidDataException(
+                    $"Invalid speaker, confidence, delivery, or rationale for segment {assignment.SegmentIndex}.");
+            }
+        }
+
+        return response.Assignments.OrderBy(assignment => assignment.SegmentIndex)
+            .Select(assignment => new DialogueAssignment
+            {
+                SegmentIndex = assignment.SegmentIndex,
+                SpeakerId = assignment.SpeakerId,
+                Confidence = assignment.Confidence,
+                Delivery = assignment.Delivery.Trim(),
+                Rationale = assignment.Rationale.Trim()
+            }).ToArray();
+    }
 
     private static JsonElement CreateResponseSchema(
         IReadOnlyList<int> dialogueIndexes,
@@ -299,11 +274,13 @@ public sealed class DialogueAttributionService
                                 },
                                 delivery = new
                                 {
-                                    type = "string"
+                                    type = "string",
+                                    maxLength = 80
                                 },
                                 rationale = new
                                 {
-                                    type = "string"
+                                    type = "string",
+                                    maxLength = 300
                                 }
                             },
                             required = new[]

@@ -48,7 +48,7 @@ public sealed class ChapterTextPreparerTests
             "We need to move," she said.
 
             The door opened.
-            """,
+            """.ReplaceLineEndings("\n"),
             prepared.SpokenText);
 
         Assert.Equal(64, prepared.SourceSha256.Length);
