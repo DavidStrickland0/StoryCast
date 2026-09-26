@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 import torchaudio
 
-from chatterbox.tts import ChatterboxTTS
+from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
 
 SAMPLE_TEXT_PARTS = [
@@ -171,7 +171,7 @@ def set_seed(seed: int) -> None:
 
 
 def generate_sample(
-    model: ChatterboxTTS,
+    model: ChatterboxMultilingualTTS,
     reference_path: Path,
 ) -> torch.Tensor:
     generated_parts: list[torch.Tensor] = []
@@ -192,6 +192,7 @@ def generate_sample(
         with torch.inference_mode():
             audio = model.generate(
                 text,
+                language_id="en",
                 audio_prompt_path=str(reference_path),
                 exaggeration=EXAGGERATION,
                 cfg_weight=CFG_WEIGHT,
@@ -249,7 +250,7 @@ def write_manifest(
 
 
 def process_voice(
-    model: ChatterboxTTS,
+    model: ChatterboxMultilingualTTS,
     ffmpeg: str,
     source: Path,
     output_root: Path,
@@ -356,8 +357,9 @@ def main() -> int:
     print()
     print("Loading Chatterbox...")
 
-    model = ChatterboxTTS.from_pretrained(
-        device=device
+    model = ChatterboxMultilingualTTS.from_pretrained(
+        device=device,
+        t3_model="v3",
     )
 
     failures: list[tuple[Path, str]] = []

@@ -270,7 +270,7 @@ def main() -> int:
 
     return (
         2
-        if summary["failed"] > 0
+        if summary["review"] > 0 or summary["failed"] > 0
         else 0
     )
 

@@ -241,7 +241,7 @@ def verify_segments_with_retries(
         rejected_segments = [
             segment
             for segment in verification["segments"]
-            if segment["status"] == "fail"
+            if segment["status"] != "pass"
         ]
 
         attempt_report_path = (

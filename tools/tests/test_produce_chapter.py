@@ -148,7 +148,7 @@ class SegmentRetryTests(unittest.TestCase):
             ]
 
             self.assertEqual(
-                ["2"],
+                ["1", "2"],
                 selected_indexes,
             )
             self.assertEqual(
@@ -156,7 +156,7 @@ class SegmentRetryTests(unittest.TestCase):
                 len(history),
             )
             self.assertEqual(
-                [2],
+                [1, 2],
                 history[0]["rejectedSegmentIndexes"],
             )
             self.assertEqual(

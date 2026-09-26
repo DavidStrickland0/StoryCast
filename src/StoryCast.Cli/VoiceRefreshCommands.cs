@@ -71,7 +71,9 @@ internal static class VoiceRefreshCommands
                 await VoiceCommands.AnalyzeAsync(
                     [
                         "--library",
-                        stagingPath
+                        stagingPath,
+                        "--worker-image",
+                        workerImage
                     ]);
 
             if (analysisExitCode != 0)

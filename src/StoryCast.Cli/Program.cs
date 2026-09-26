@@ -378,7 +378,7 @@ static void WriteHelp()
           storycast voices list [--library <path>]
           storycast voices refresh [--samples <path>] [--library <path>] [--model <model>] [--worker-image <image>]
           storycast voices enrich [--library <path>]
-          storycast voices analyze [--library <path>] [--output <path>]
+          storycast voices analyze [--library <path>] [--output <path>] [--worker-image <image>]
           storycast voices verify [--library <path>] [--model <model>] [--worker-image <image>]
           storycast manuscript inspect <file-or-directory>
           storycast characters discover <book-directory> --model <model>

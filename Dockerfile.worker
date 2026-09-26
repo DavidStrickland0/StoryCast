@@ -23,10 +23,15 @@ WORKDIR /app
 
 COPY requirements.worker.txt /app/requirements.worker.txt
 
-RUN python3.12 -m venv /opt/storycast \
-    && /opt/storycast/bin/python -m pip install --upgrade pip "setuptools<81" wheel \
+RUN --mount=type=cache,target=/models/cache/pip \
+    python3.12 -m venv /opt/storycast \
+    && /opt/storycast/bin/python -m pip install --upgrade pip setuptools wheel \
     && /opt/storycast/bin/python -m pip install \
-        --requirement /app/requirements.worker.txt
+        --requirement /app/requirements.worker.txt \
+    && /opt/storycast/bin/python -m pip install \
+        --no-deps \
+        --force-reinstall \
+        "chatterbox-tts @ https://github.com/resemble-ai/chatterbox/archive/5de7a54aa4e5e2baadb0182dde554908b48b85c2.zip"
 
 COPY tools /app/tools
 

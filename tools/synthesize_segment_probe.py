@@ -10,7 +10,7 @@ import torch
 import torchaudio
 
 from prosody import resolve_segment_synthesis_settings
-from chatterbox.tts import ChatterboxTTS
+from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
 
 DEFAULT_NARRATOR_EXAGGERATION = 0.4
@@ -218,8 +218,9 @@ def main() -> int:
     print()
     print("Loading Chatterbox...", flush=True)
 
-    model = ChatterboxTTS.from_pretrained(
-        device=device
+    model = ChatterboxMultilingualTTS.from_pretrained(
+        device=device,
+        t3_model="v3",
     )
 
     print("Synthesizing segment...", flush=True)
@@ -227,6 +228,7 @@ def main() -> int:
     with torch.inference_mode():
         audio = model.generate(
             segment["sourceText"],
+            language_id="en",
             audio_prompt_path=str(voice_sample),
             exaggeration=synthesis_settings["exaggeration"],
             cfg_weight=synthesis_settings["cfgWeight"],

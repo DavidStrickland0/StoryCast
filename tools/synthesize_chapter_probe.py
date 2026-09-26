@@ -609,7 +609,7 @@ def main() -> int:
     model = None
 
     if segments:
-        from chatterbox.tts import ChatterboxTTS
+        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
         print()
         print(
@@ -617,8 +617,9 @@ def main() -> int:
             flush=True,
         )
 
-        model = ChatterboxTTS.from_pretrained(
-            device=device
+        model = ChatterboxMultilingualTTS.from_pretrained(
+            device=device,
+            t3_model="v3",
         )
 
     generated_segments: list[dict] = []
@@ -725,6 +726,7 @@ def main() -> int:
                         chunk_text,
                         pronunciations,
                     ),
+                    language_id="en",
                     audio_prompt_path=str(voice_sample),
                     exaggeration=
                         synthesis_settings["exaggeration"],
