@@ -21,7 +21,7 @@ import produce_chapter
 
 
 class SegmentRetryTests(unittest.TestCase):
-    def test_retries_only_rejected_segments(self) -> None:
+    def test_retries_only_rejected_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             chapter_directory = root / "chapter-001"
@@ -59,16 +59,16 @@ class SegmentRetryTests(unittest.TestCase):
 
                     if verification_number == 1:
                         statuses = [
-                            (0, "pass"),
-                            (1, "review"),
-                            (2, "fail"),
+                            (0, 0, "pass"),
+                            (0, 1, "review"),
+                            (1, 0, "fail"),
                         ]
                         exit_code = 2
                     else:
                         statuses = [
-                            (0, "pass"),
-                            (1, "pass"),
-                            (2, "pass"),
+                            (0, 0, "pass"),
+                            (0, 1, "pass"),
+                            (1, 0, "pass"),
                         ]
                         exit_code = 0
 
@@ -76,23 +76,42 @@ class SegmentRetryTests(unittest.TestCase):
                         "summary": {
                             "passed": sum(
                                 status == "pass"
-                                for _, status in statuses
+                                for _, _, status in statuses
                             ),
                             "review": sum(
                                 status == "review"
-                                for _, status in statuses
+                                for _, _, status in statuses
                             ),
                             "failed": sum(
                                 status == "fail"
-                                for _, status in statuses
+                                for _, _, status in statuses
                             ),
                         },
                         "segments": [
                             {
-                                "segmentIndex": index,
+                                "segmentIndex": 0,
+                                "status": (
+                                    "review"
+                                    if verification_number == 1
+                                    else "pass"
+                                ),
+                            },
+                            {
+                                "segmentIndex": 1,
+                                "status": (
+                                    "fail"
+                                    if verification_number == 1
+                                    else "pass"
+                                ),
+                            }
+                        ],
+                        "chunks": [
+                            {
+                                "segmentIndex": segment_index,
+                                "chunkIndex": chunk_index,
                                 "status": status,
                             }
-                            for index, status in statuses
+                            for segment_index, chunk_index, status in statuses
                         ],
                     }
 
@@ -139,25 +158,32 @@ class SegmentRetryTests(unittest.TestCase):
 
             retry_arguments = synthesis_calls[0]
 
-            selected_indexes = [
+            selected_chunks = [
                 retry_arguments[index + 1]
                 for index, value in enumerate(
                     retry_arguments
                 )
-                if value == "--segment-index"
+                if value == "--chunk"
             ]
 
             self.assertEqual(
-                ["1", "2"],
-                selected_indexes,
+                ["0:1", "1:0"],
+                selected_chunks,
             )
             self.assertEqual(
                 2,
                 len(history),
             )
             self.assertEqual(
-                [1, 2],
+                [],
                 history[0]["rejectedSegmentIndexes"],
+            )
+            self.assertEqual(
+                [
+                    {"segmentIndex": 0, "chunkIndex": 1},
+                    {"segmentIndex": 1, "chunkIndex": 0},
+                ],
+                history[0]["rejectedChunks"],
             )
             self.assertEqual(
                 [],

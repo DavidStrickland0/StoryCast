@@ -92,7 +92,7 @@ def main() -> int:
                 f"verification result."
             )
 
-        if verification_result["status"] == "fail":
+        if verification_result["status"] != "pass":
             raise RuntimeError(
                 f"Segment {segment_index} has verification "
                 f"status '{verification_result['status']}'."

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import uuid
@@ -214,6 +215,56 @@ def write_json_atomic(
     temporary_path.replace(path)
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_chunk_selector(value: str) -> tuple[int, int]:
+    try:
+        segment_text, chunk_text = value.split(":", 1)
+        segment_index = int(segment_text)
+        chunk_index = int(chunk_text)
+    except (ValueError, TypeError) as exception:
+        raise argparse.ArgumentTypeError(
+            "Chunk selectors must use <segment-index>:<chunk-index>."
+        ) from exception
+    if segment_index < 0 or chunk_index < 0:
+        raise argparse.ArgumentTypeError(
+            "Chunk selector indexes must be nonnegative."
+        )
+    return segment_index, chunk_index
+
+
+def chunks_are_reusable(
+    segment: dict,
+    synthesis_units: list[tuple[str, float]],
+    chapter_directory: Path,
+) -> bool:
+    chunks = segment.get("chunks", [])
+    if len(chunks) != len(synthesis_units):
+        return False
+    for chunk_index, (text, pause) in enumerate(synthesis_units):
+        chunk = chunks[chunk_index]
+        path = (
+            chapter_directory /
+            f"segment-{segment['index']:04d}-chunk-{chunk_index:04d}.wav"
+        ).resolve()
+        if (
+            chunk.get("index") != chunk_index or
+            chunk.get("sourceText") != text or
+            chunk.get("pauseAfterSeconds") != pause or
+            Path(chunk.get("audioPath", "")).resolve() != path or
+            not path.is_file() or
+            chunk.get("sha256") != file_sha256(path)
+        ):
+            return False
+    return True
+
+
 def load_voice_samples(
     library: Path,
 ) -> dict[str, Path]:
@@ -300,6 +351,13 @@ def main() -> int:
         default=None,
     )
     parser.add_argument(
+        "--chunk",
+        type=parse_chunk_selector,
+        action="append",
+        default=None,
+        help="Regenerate one chunk as <segment-index>:<chunk-index>.",
+    )
+    parser.add_argument(
         "--attempt",
         type=int,
         default=0,
@@ -348,7 +406,12 @@ def main() -> int:
     selected_indexes = set(
         args.segment_index or []
     )
-    is_retry = bool(selected_indexes)
+    selected_chunks = set(args.chunk or [])
+    selected_indexes.update(
+        segment_index
+        for segment_index, _ in selected_chunks
+    )
+    is_retry = bool(selected_indexes or selected_chunks)
     is_resume = args.resume
 
     if is_retry and is_resume:
@@ -452,6 +515,23 @@ def main() -> int:
         manifest = load_json(
             manifest_path
         )
+
+        chunks_by_segment = {
+            segment["index"]: {
+                chunk["index"]
+                for chunk in segment.get("chunks", [])
+            }
+            for segment in manifest.get("segments", [])
+        }
+        unknown_chunks = [
+            selector
+            for selector in selected_chunks
+            if selector[1] not in chunks_by_segment.get(selector[0], set())
+        ]
+        if unknown_chunks:
+            raise RuntimeError(
+                f"Unknown chunk selectors: {sorted(unknown_chunks)}"
+            )
     elif is_resume and manifest_path.is_file():
         manifest = load_json(
             manifest_path
@@ -550,6 +630,14 @@ def main() -> int:
                 existing.get("sourceText") ==
                     segment["sourceText"] and
                 existing.get("attempt") == 0 and
+                chunks_are_reusable(
+                    existing,
+                    split_synthesis_units(
+                        segment["sourceText"],
+                        markdown_headings,
+                    ),
+                    chapter_directory,
+                ) and
                 Path(
                     existing.get(
                         "audioPath",
@@ -700,56 +788,119 @@ def main() -> int:
         )
 
         generated_chunks: list[torch.Tensor] = []
+        chunk_records: list[dict] = []
+        existing_segment = next(
+            (
+                item
+                for item in manifest["segments"]
+                if item["index"] == segment_index
+            ),
+            None,
+        )
+        existing_chunks = {
+            item["index"]: item
+            for item in (
+                existing_segment.get("chunks", [])
+                if existing_segment is not None
+                else []
+            )
+        }
 
         for chunk_index, synthesis_unit in enumerate(
             synthesis_units
         ):
             chunk_text, pause_after_seconds = synthesis_unit
             chunk_seed = seed + chunk_index
-
-            print(
-                f"  chunk {chunk_index + 1}/"
-                f"{len(synthesis_units)} | "
-                f"{len(chunk_text)} characters",
-                flush=True,
+            chunk_output_path = (
+                chapter_directory /
+                f"segment-{segment_index:04d}-chunk-{chunk_index:04d}.wav"
             )
-            torch.manual_seed(chunk_seed)
+            regenerate_chunk = (
+                not selected_chunks or
+                (segment_index, chunk_index) in selected_chunks
+            )
+            existing_chunk = existing_chunks.get(chunk_index)
 
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(
-                    chunk_seed
+            if not regenerate_chunk:
+                if (
+                    existing_chunk is None or
+                    existing_chunk.get("sourceText") != chunk_text or
+                    not chunk_output_path.is_file()
+                ):
+                    raise RuntimeError(
+                        f"Chunk {segment_index}:{chunk_index} cannot be reused."
+                    )
+                chunk_audio, chunk_sample_rate = torchaudio.load(
+                    str(chunk_output_path)
                 )
-
-            with torch.inference_mode():
-                generated_audio = model.generate(
-                    apply_pronunciations(
-                        chunk_text,
-                        pronunciations,
-                    ),
-                    language_id="en",
-                    audio_prompt_path=str(voice_sample),
-                    exaggeration=
-                        synthesis_settings["exaggeration"],
-                    cfg_weight=
-                        synthesis_settings["cfgWeight"],
-                    temperature=
-                        synthesis_settings["temperature"],
+                if chunk_sample_rate != model.sr:
+                    raise RuntimeError(
+                        f"Chunk {segment_index}:{chunk_index} uses an "
+                        f"unexpected sample rate."
+                    )
+                chunk_record = dict(existing_chunk)
+                generated_chunks.append(chunk_audio)
+                chunk_records.append(chunk_record)
+                print(
+                    f"  chunk {chunk_index + 1}/{len(synthesis_units)} | "
+                    f"reused",
+                    flush=True,
                 )
+            else:
+                print(
+                    f"  chunk {chunk_index + 1}/"
+                    f"{len(synthesis_units)} | "
+                    f"{len(chunk_text)} characters",
+                    flush=True,
+                )
+                torch.manual_seed(chunk_seed)
 
-            chunk_audio = generated_audio.detach().to(
-                device="cpu",
-                dtype=torch.float32,
-            )
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(chunk_seed)
 
-            del generated_audio
+                with torch.inference_mode():
+                    generated_audio = model.generate(
+                        apply_pronunciations(chunk_text, pronunciations),
+                        language_id="en",
+                        audio_prompt_path=str(voice_sample),
+                        exaggeration=synthesis_settings["exaggeration"],
+                        cfg_weight=synthesis_settings["cfgWeight"],
+                        temperature=synthesis_settings["temperature"],
+                    )
 
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
+                chunk_audio = generated_audio.detach().to(
+                    device="cpu",
+                    dtype=torch.float32,
+                )
+                del generated_audio
 
-            generated_chunks.append(
-                chunk_audio
-            )
+                chunk_temporary_path = chunk_output_path.with_name(
+                    f".{chunk_output_path.name}.tmp"
+                )
+                torchaudio.save(
+                    str(chunk_temporary_path),
+                    chunk_audio,
+                    model.sr,
+                    format="wav",
+                )
+                chunk_temporary_path.replace(chunk_output_path)
+                chunk_record = {
+                    "index": chunk_index,
+                    "sourceText": chunk_text,
+                    "pauseAfterSeconds": pause_after_seconds,
+                    "seed": chunk_seed,
+                    "attempt": args.attempt,
+                    "sampleRate": model.sr,
+                    "durationSeconds": chunk_audio.shape[-1] / model.sr,
+                    "audioPath": str(chunk_output_path),
+                    "sha256": file_sha256(chunk_output_path),
+                }
+                generated_chunks.append(chunk_audio)
+                chunk_records.append(chunk_record)
+
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
 
             if chunk_index + 1 < len(
                 synthesis_units
@@ -812,6 +963,8 @@ def main() -> int:
                 "durationSeconds":
                     duration_seconds,
                 "audioPath": str(output_path),
+                "sha256": file_sha256(output_path),
+                "chunks": chunk_records,
             }
         )
 

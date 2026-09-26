@@ -238,11 +238,20 @@ def verify_segments_with_retries(
             verification_path
         )
 
-        rejected_segments = [
-            segment
-            for segment in verification["segments"]
-            if segment["status"] != "pass"
+        rejected_chunks = [
+            chunk
+            for chunk in verification.get("chunks", [])
+            if chunk["status"] != "pass"
         ]
+        rejected_segments = (
+            []
+            if "chunks" in verification
+            else [
+                segment
+                for segment in verification["segments"]
+                if segment["status"] != "pass"
+            ]
+        )
 
         attempt_report_path = (
             chapter_manifest.parent /
@@ -269,11 +278,18 @@ def verify_segments_with_retries(
                     segment["segmentIndex"]
                     for segment in rejected_segments
                 ],
+                "rejectedChunks": [
+                    {
+                        "segmentIndex": chunk["segmentIndex"],
+                        "chunkIndex": chunk["chunkIndex"],
+                    }
+                    for chunk in rejected_chunks
+                ],
             }
         )
 
         if exit_code == 0:
-            if rejected_segments:
+            if rejected_segments or rejected_chunks:
                 raise RuntimeError(
                     "Verification returned success while "
                     "reporting rejected segments."
@@ -281,7 +297,7 @@ def verify_segments_with_retries(
 
             return
 
-        if not rejected_segments:
+        if not rejected_segments and not rejected_chunks:
             raise RuntimeError(
                 "Verification returned failure without "
                 "identifying rejected segments."
@@ -289,7 +305,10 @@ def verify_segments_with_retries(
 
         if attempt >= max_attempts:
             indexes = [
-                segment["segmentIndex"]
+                f"{chunk['segmentIndex']}:{chunk['chunkIndex']}"
+                for chunk in rejected_chunks
+            ] or [
+                str(segment["segmentIndex"])
                 for segment in rejected_segments
             ]
 
@@ -322,6 +341,14 @@ def verify_segments_with_retries(
                 ]
             )
 
+        for chunk in rejected_chunks:
+            synthesis_arguments.extend(
+                [
+                    "--chunk",
+                    f"{chunk['segmentIndex']}:{chunk['chunkIndex']}",
+                ]
+            )
+
         run_stage(
             f"Selective synthesis retry {attempt}",
             synthesis_arguments,
@@ -332,10 +359,14 @@ def segment_audio_paths(
 ) -> list[Path]:
     manifest = load_json(chapter_manifest)
 
-    return [
-        Path(segment["audioPath"]).resolve()
-        for segment in manifest["segments"]
-    ]
+    paths: list[Path] = []
+    for segment in manifest["segments"]:
+        paths.extend(
+            Path(chunk["audioPath"]).resolve()
+            for chunk in segment.get("chunks", [])
+        )
+        paths.append(Path(segment["audioPath"]).resolve())
+    return paths
 
 
 def run_checkpointed_stage(

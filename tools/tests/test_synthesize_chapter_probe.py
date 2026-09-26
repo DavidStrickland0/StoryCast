@@ -12,7 +12,10 @@ sys.path.insert(
     str(TOOLS_DIRECTORY),
 )
 
-from synthesize_chapter_probe import split_synthesis_text
+from synthesize_chapter_probe import (
+    parse_chunk_selector,
+    split_synthesis_text,
+)
 
 
 class SynthesisTextChunkTests(unittest.TestCase):
@@ -78,6 +81,9 @@ class SynthesisTextChunkTests(unittest.TestCase):
                 "Text",
                 max_characters=0,
             )
+
+    def test_parses_chunk_selector(self) -> None:
+        self.assertEqual((12, 3), parse_chunk_selector("12:3"))
 
 
 if __name__ == "__main__":
