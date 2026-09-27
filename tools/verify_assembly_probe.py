@@ -87,40 +87,126 @@ def main() -> int:
         flush=True,
     )
 
-    transcription_segments, _ = model.transcribe(
-        str(audio_path),
-        language="en",
-        beam_size=5,
-        vad_filter=True,
-        condition_on_previous_text=False,
-        temperature=0.0,
-        word_timestamps=True,
-        hallucination_silence_threshold=1.0,
-    )
+    # The assembly manifest supplies exact offsets for the audio that was
+    # concatenated. Transcribing the entire chapter in one pass can make
+    # Whisper drift or repeat text after many minutes of speech.
+    import torchaudio
 
-    transcription = " ".join(
-        segment.text.strip()
-        for segment in transcription_segments
-    ).strip()
-
-    expected_words = normalize_words(
-        expected_text
+    chapter_segments = {
+        item["index"]: item
+        for item in chapter_manifest["segments"]
+    }
+    timed_segments = sorted(
+        assembly["segments"],
+        key=lambda item: item["segmentIndex"],
     )
+    if not timed_segments:
+        raise ValueError("Assembly has no timed segments.")
 
-    actual_words = normalize_words(
-        transcription
-    )
+    windows = []
+    current = []
+    for item in timed_segments:
+        if item["segmentIndex"] not in chapter_segments:
+            raise ValueError(
+                f"Missing source text for segment {item['segmentIndex']}."
+            )
+        if current and (
+            item["endSeconds"] - current[0]["startSeconds"] > 30.0
+        ):
+            windows.append(current)
+            current = []
+        current.append(item)
+    if current:
+        windows.append(current)
 
-    distance = edit_distance(
-        expected_words,
-        actual_words,
-    )
+    audio_info = torchaudio.info(str(audio_path))
+    expected_rate = assembly["sampleRate"]
+    if audio_info.sample_rate != expected_rate:
+        raise ValueError(
+            f"Audio sample rate {audio_info.sample_rate} does not match "
+            f"assembly rate {expected_rate}."
+        )
 
-    word_error_rate = (
-        distance / len(expected_words)
-        if expected_words
-        else 1.0
-    )
+    results = []
+    all_transcriptions = []
+    distance = 0
+    expected_count = 0
+    actual_count = 0
+    for number, items in enumerate(windows, start=1):
+        start_frame = round(items[0]["startSeconds"] * expected_rate)
+        end_frame = round(items[-1]["endSeconds"] * expected_rate)
+        if start_frame < 0 or end_frame > audio_info.num_frames:
+            raise ValueError(
+                f"Window {number} is outside the assembled audio."
+            )
+        waveform, sample_rate = torchaudio.load(
+            str(audio_path),
+            frame_offset=start_frame,
+            num_frames=end_frame - start_frame,
+        )
+        waveform = waveform.mean(dim=0, keepdim=True)
+        if sample_rate != 16000:
+            waveform = torchaudio.functional.resample(
+                waveform, sample_rate, 16000
+            )
+        transcription_segments, _ = model.transcribe(
+            waveform.squeeze(0).numpy(),
+            language="en",
+            beam_size=5,
+            vad_filter=True,
+            condition_on_previous_text=False,
+            temperature=0.0,
+            word_timestamps=True,
+            hallucination_silence_threshold=1.0,
+        )
+        heard = " ".join(
+            segment.text.strip()
+            for segment in transcription_segments
+        ).strip()
+        expected = "".join(
+            chapter_segments[item["segmentIndex"]]["sourceText"]
+            for item in items
+        )
+        expected_window_words = normalize_words(expected)
+        heard_words = normalize_words(heard)
+        window_distance = edit_distance(
+            expected_window_words, heard_words
+        )
+        window_rate = (
+            window_distance / len(expected_window_words)
+            if expected_window_words else 1.0
+        )
+        results.append({
+            "windowIndex": number,
+            "firstSegmentIndex": items[0]["segmentIndex"],
+            "lastSegmentIndex": items[-1]["segmentIndex"],
+            "startSeconds": items[0]["startSeconds"],
+            "endSeconds": items[-1]["endSeconds"],
+            "expectedWordCount": len(expected_window_words),
+            "transcribedWordCount": len(heard_words),
+            "editDistance": window_distance,
+            "wordErrorRate": round(window_rate, 6),
+            "transcription": heard,
+        })
+        distance += window_distance
+        expected_count += len(expected_window_words)
+        actual_count += len(heard_words)
+        all_transcriptions.append(heard)
+        print(
+            f"Window {number}/{len(windows)}: "
+            f"segments {items[0]['segmentIndex']}-"
+            f"{items[-1]['segmentIndex']}, "
+            f"WER {window_rate:.1%}",
+            flush=True,
+        )
+
+    transcription = " ".join(all_transcriptions).strip()
+    expected_words = normalize_words(expected_text)
+    if expected_count != len(expected_words):
+        raise ValueError(
+            "Window text does not match the complete chapter text."
+        )
+    word_error_rate = distance / expected_count if expected_count else 1.0
 
     if word_error_rate <= 0.08:
         status = "pass"
@@ -138,7 +224,7 @@ def main() -> int:
         "chapterId": assembly["chapterId"],
         "status": status,
         "expectedWordCount": len(expected_words),
-        "transcribedWordCount": len(actual_words),
+        "transcribedWordCount": actual_count,
         "editDistance": distance,
         "wordErrorRate": round(
             word_error_rate,
@@ -147,6 +233,7 @@ def main() -> int:
         "expectedText": expected_text,
         "transcription": transcription,
         "audioPath": str(audio_path),
+        "windows": results,
     }
 
     report_path = (
@@ -182,7 +269,7 @@ def main() -> int:
     print(transcription)
     print()
     print(f"Expected words: {len(expected_words)}")
-    print(f"Actual words:   {len(actual_words)}")
+    print(f"Actual words:   {actual_count}")
     print(f"Edit distance:  {distance}")
     print(f"Word error rate: {word_error_rate:.1%}")
     print(f"Status:          {status}")
