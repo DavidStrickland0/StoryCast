@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from faster_whisper import WhisperModel
+from spoken_text import normalize_spoken_text
 
 from verify_voice_library import (
     edit_distance,
@@ -76,11 +77,11 @@ def main() -> int:
     ).strip()
 
     expected_words = normalize_words(
-        expected_text
+        normalize_spoken_text(expected_text)
     )
 
     actual_words = normalize_words(
-        transcription
+        normalize_spoken_text(transcription)
     )
 
     distance = edit_distance(

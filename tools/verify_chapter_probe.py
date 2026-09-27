@@ -6,12 +6,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from faster_whisper import WhisperModel
+import torchaudio
 
+from audio_postprocessing import analyze_audio
 from pronunciations import (
     canonicalize_transcription,
     find_book_root,
     load_pronunciations,
 )
+from spoken_text import normalize_spoken_text
 
 from verify_voice_library import (
     edit_distance,
@@ -90,6 +93,8 @@ def verify_audio(
     expected_text: str,
     pronunciations: list,
 ) -> dict:
+    audio, sample_rate = torchaudio.load(str(audio_path))
+    audio_quality = analyze_audio(audio, sample_rate)
     transcription_segments, _ = model.transcribe(
         str(audio_path),
         language="en",
@@ -108,10 +113,14 @@ def verify_audio(
         "\u00e2\u20ac\u2122", "'"
     )
     expected_words = normalize_words(
-        canonicalize_transcription(expected_text, pronunciations)
+        normalize_spoken_text(
+            canonicalize_transcription(expected_text, pronunciations)
+        )
     )
     actual_words = normalize_words(
-        canonicalize_transcription(transcription, pronunciations)
+        normalize_spoken_text(
+            canonicalize_transcription(transcription, pronunciations)
+        )
     )
     distance = edit_distance(expected_words, actual_words)
     word_error_rate = (
@@ -124,6 +133,13 @@ def verify_audio(
         actual_words,
         word_error_rate,
     )
+    if (
+        audio_quality["maximumSilenceSeconds"] > 1.5 or
+        audio_quality["leadingSilenceSeconds"] > 0.6 or
+        audio_quality["trailingSilenceSeconds"] > 0.6
+    ):
+        status = "fail"
+        verification_mode = "audio-quality-silence"
     return {
         "expectedWordCount": len(expected_words),
         "transcribedWordCount": len(actual_words),
@@ -134,6 +150,7 @@ def verify_audio(
         "expectedText": expected_text,
         "transcription": transcription,
         "audioPath": str(audio_path),
+        "audioQuality": audio_quality,
     }
 
 

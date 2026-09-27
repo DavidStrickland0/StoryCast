@@ -11,6 +11,85 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+SYNTHESIS_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
+
+
+class PersistentSynthesisWorker:
+    def __init__(self, script_path: Path) -> None:
+        self.process = subprocess.Popen(
+            [
+                sys.executable,
+                str(script_path),
+                "--persistent-worker",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+    def run(
+        self,
+        name: str,
+        arguments: list[str],
+    ) -> int:
+        if self.process.stdin is None or self.process.stdout is None:
+            raise RuntimeError("Synthesis worker pipes are unavailable.")
+
+        print()
+        print(f"===== {name} =====", flush=True)
+        request = {
+            "arguments": arguments[2:],
+        }
+        self.process.stdin.write(json.dumps(request) + "\n")
+        self.process.stdin.flush()
+
+        for line in self.process.stdout:
+            if line.startswith(SYNTHESIS_RESULT_PREFIX):
+                response = json.loads(
+                    line[len(SYNTHESIS_RESULT_PREFIX):]
+                )
+
+                if not response.get("ok"):
+                    raise RuntimeError(
+                        "Persistent synthesis failed: " +
+                        response.get("error", "unknown error")
+                    )
+
+                exit_code = int(response.get("exitCode", 1))
+                if exit_code != 0:
+                    raise RuntimeError(
+                        f"{name} failed with exit code {exit_code}."
+                    )
+
+                return exit_code
+
+            print(line, end="", flush=True)
+
+        raise RuntimeError(
+            "Persistent synthesis worker exited unexpectedly."
+        )
+
+    def close(self) -> None:
+        if self.process.poll() is not None:
+            return
+
+        if self.process.stdin is not None:
+            try:
+                self.process.stdin.write(
+                    json.dumps({"command": "stop"}) + "\n"
+                )
+                self.process.stdin.flush()
+            except BrokenPipeError:
+                pass
+
+        try:
+            self.process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            self.process.wait(timeout=10)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -209,6 +288,7 @@ def verify_segments_with_retries(
     whisper_model: str,
     max_attempts: int,
     attempt_history: list[dict],
+    synthesis_runner=None,
 ) -> None:
     verification_path = (
         chapter_manifest.parent /
@@ -349,10 +429,18 @@ def verify_segments_with_retries(
                 ]
             )
 
-        run_stage(
-            f"Selective synthesis retry {attempt}",
-            synthesis_arguments,
-        )
+        retry_name = f"Selective synthesis retry {attempt}"
+
+        if synthesis_runner is None:
+            run_stage(
+                retry_name,
+                synthesis_arguments,
+            )
+        else:
+            synthesis_runner(
+                retry_name,
+                synthesis_arguments,
+            )
 
 def segment_audio_paths(
     chapter_manifest: Path,
@@ -590,9 +678,15 @@ def main() -> int:
     )
 
     current_stage = "initialization"
+    synthesis_worker = None
 
     try:
         current_stage = "synthesis"
+
+        synthesis_worker = PersistentSynthesisWorker(
+            tools_directory /
+            "synthesize_chapter_probe.py"
+        )
 
         synthesis_arguments = [
             sys.executable,
@@ -613,7 +707,7 @@ def main() -> int:
                 "--resume"
             )
 
-        run_stage(
+        synthesis_worker.run(
             (
                 "Resume synthesis"
                 if is_resume
@@ -668,8 +762,12 @@ def main() -> int:
                 report[
                     "segmentVerificationAttempts"
                 ],
+                synthesis_worker.run,
             ),
         )
+
+        synthesis_worker.close()
+        synthesis_worker = None
 
         raw_chapter_audio = (
             chapter_directory /
@@ -917,6 +1015,9 @@ def main() -> int:
 
         return 0
     except Exception:
+        if synthesis_worker is not None:
+            synthesis_worker.close()
+
         report["status"] = "failed"
         report["failedStage"] = current_stage
         report["completedUtc"] = (

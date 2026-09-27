@@ -43,6 +43,7 @@ class SegmentRetryTests(unittest.TestCase):
 
             verification_number = 0
             calls: list[tuple[str, list[str]]] = []
+            synthesis_calls: list[list[str]] = []
 
             def fake_run_stage(
                 name: str,
@@ -126,6 +127,16 @@ class SegmentRetryTests(unittest.TestCase):
 
             history: list[dict] = []
 
+            def fake_synthesis_runner(
+                name: str,
+                arguments: list[str],
+            ) -> int:
+                self.assertTrue(
+                    name.startswith("Selective synthesis")
+                )
+                synthesis_calls.append(arguments)
+                return 0
+
             with patch.object(
                 produce_chapter,
                 "run_stage",
@@ -141,15 +152,8 @@ class SegmentRetryTests(unittest.TestCase):
                     "small.en",
                     3,
                     history,
+                    fake_synthesis_runner,
                 )
-
-            synthesis_calls = [
-                arguments
-                for name, arguments in calls
-                if name.startswith(
-                    "Selective synthesis"
-                )
-            ]
 
             self.assertEqual(
                 1,

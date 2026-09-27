@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import re
+import sys
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,12 +14,14 @@ from pathlib import Path
 import torch
 import torchaudio
 
+from audio_postprocessing import polish_audio
 from prosody import resolve_segment_synthesis_settings
 from pronunciations import (
     apply_pronunciations,
     load_pronunciations,
     pronunciation_fingerprint,
 )
+from spoken_text import normalize_spoken_text
 
 
 DEFAULT_NARRATOR_EXAGGERATION = 0.4
@@ -26,6 +31,8 @@ DEFAULT_TEMPERATURE = 0.7
 MAX_SYNTHESIS_CHARACTERS = 280
 CHUNK_PAUSE_SECONDS = 0.12
 HEADING_PAUSE_SECONDS = 1.25
+WORKER_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
+_CACHED_MODEL = None
 
 
 def split_synthesis_text(
@@ -318,7 +325,31 @@ def create_run_directory(book: Path) -> Path:
     return run_directory
 
 
-def main() -> int:
+def move_model(model, device: str) -> None:
+    model.t3.to(device)
+    model.s3gen.to(device)
+    model.ve.to(device)
+
+    if model.conds is not None:
+        model.conds = model.conds.to(device)
+
+    model.device = device
+
+
+def park_cached_model() -> None:
+    if _CACHED_MODEL is None:
+        return
+
+    move_model(_CACHED_MODEL, "cpu")
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def main(
+    arguments: list[str] | None = None,
+) -> int:
     parser = argparse.ArgumentParser(
         description="Synthesize one complete StoryCast chapter."
     )
@@ -363,7 +394,7 @@ def main() -> int:
         default=0,
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(arguments)
 
     book = args.book.resolve()
 
@@ -629,7 +660,6 @@ def main() -> int:
                     segment_pronunciation_fingerprint and
                 existing.get("sourceText") ==
                     segment["sourceText"] and
-                existing.get("attempt") == 0 and
                 chunks_are_reusable(
                     existing,
                     split_synthesis_units(
@@ -694,21 +724,32 @@ def main() -> int:
     print(f"Attempt:  {args.attempt}", flush=True)
     print(f"Reused:   {reused_segments}", flush=True)
     print(f"Device:   {device}", flush=True)
+    global _CACHED_MODEL
     model = None
 
     if segments:
-        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+        if _CACHED_MODEL is None:
+            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-        print()
-        print(
-            "Loading Chatterbox...",
-            flush=True,
-        )
+            print()
+            print(
+                "Loading Chatterbox...",
+                flush=True,
+            )
 
-        model = ChatterboxMultilingualTTS.from_pretrained(
-            device=device,
-            t3_model="v3",
-        )
+            _CACHED_MODEL = ChatterboxMultilingualTTS.from_pretrained(
+                device=device,
+                t3_model="v3",
+            )
+        else:
+            print()
+            print(
+                "Reusing Chatterbox model...",
+                flush=True,
+            )
+            move_model(_CACHED_MODEL, device)
+
+        model = _CACHED_MODEL
 
     generated_segments: list[dict] = []
 
@@ -806,6 +847,16 @@ def main() -> int:
             )
         }
 
+        if any(
+            not selected_chunks or
+            (segment_index, chunk_index) in selected_chunks
+            for chunk_index in range(len(synthesis_units))
+        ):
+            model.prepare_conditionals(
+                str(voice_sample),
+                exaggeration=synthesis_settings["exaggeration"],
+            )
+
         for chunk_index, synthesis_unit in enumerate(
             synthesis_units
         ):
@@ -847,6 +898,12 @@ def main() -> int:
                     flush=True,
                 )
             else:
+                synthesis_text = normalize_spoken_text(
+                    apply_pronunciations(
+                        chunk_text,
+                        pronunciations,
+                    )
+                )
                 print(
                     f"  chunk {chunk_index + 1}/"
                     f"{len(synthesis_units)} | "
@@ -860,9 +917,9 @@ def main() -> int:
 
                 with torch.inference_mode():
                     generated_audio = model.generate(
-                        apply_pronunciations(chunk_text, pronunciations),
+                        synthesis_text,
                         language_id="en",
-                        audio_prompt_path=str(voice_sample),
+                        audio_prompt_path=None,
                         exaggeration=synthesis_settings["exaggeration"],
                         cfg_weight=synthesis_settings["cfgWeight"],
                         temperature=synthesis_settings["temperature"],
@@ -873,6 +930,10 @@ def main() -> int:
                     dtype=torch.float32,
                 )
                 del generated_audio
+                chunk_audio, audio_processing = polish_audio(
+                    chunk_audio,
+                    model.sr,
+                )
 
                 chunk_temporary_path = chunk_output_path.with_name(
                     f".{chunk_output_path.name}.tmp"
@@ -887,6 +948,7 @@ def main() -> int:
                 chunk_record = {
                     "index": chunk_index,
                     "sourceText": chunk_text,
+                    "synthesisText": synthesis_text,
                     "pauseAfterSeconds": pause_after_seconds,
                     "seed": chunk_seed,
                     "attempt": args.attempt,
@@ -894,6 +956,7 @@ def main() -> int:
                     "durationSeconds": chunk_audio.shape[-1] / model.sr,
                     "audioPath": str(chunk_output_path),
                     "sha256": file_sha256(chunk_output_path),
+                    "audioProcessing": audio_processing,
                 }
                 generated_chunks.append(chunk_audio)
                 chunk_records.append(chunk_record)
@@ -1010,5 +1073,49 @@ def main() -> int:
     return 0
 
 
+def run_persistent_worker() -> int:
+    for line in sys.stdin:
+        try:
+            request = json.loads(line)
+
+            if request.get("command") == "stop":
+                park_cached_model()
+                return 0
+
+            arguments = request.get("arguments")
+            if not isinstance(arguments, list) or not all(
+                isinstance(argument, str)
+                for argument in arguments
+            ):
+                raise ValueError(
+                    "Persistent synthesis requests require string arguments."
+                )
+
+            exit_code = main(arguments)
+            park_cached_model()
+            response = {
+                "ok": True,
+                "exitCode": exit_code,
+            }
+        except Exception as exception:
+            traceback.print_exc()
+            park_cached_model()
+            response = {
+                "ok": False,
+                "error": str(exception),
+            }
+
+        print(
+            WORKER_RESULT_PREFIX + json.dumps(response),
+            flush=True,
+        )
+
+    park_cached_model()
+    return 0
+
+
 if __name__ == "__main__":
+    if "--persistent-worker" in sys.argv[1:]:
+        raise SystemExit(run_persistent_worker())
+
     raise SystemExit(main())
