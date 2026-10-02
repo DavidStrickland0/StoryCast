@@ -12,7 +12,8 @@ sys.path.insert(
     str(TOOLS_DIRECTORY),
 )
 
-from synthesize_chapter_probe import (
+from synthesis_chunking import (
+    ends_at_sentence_boundary,
     parse_chunk_selector,
     split_synthesis_text,
 )
@@ -54,6 +55,31 @@ class SynthesisTextChunkTests(unittest.TestCase):
             text.replace(" ", "").strip(),
             "".join(chunks).replace(" ", ""),
         )
+
+    def test_prefers_early_sentence_end_over_mid_sentence_cut(self) -> None:
+        text = (
+            "You had to be the guy who got the job done, the one who held "
+            "the line while the rest of them scrambled for cover. "
+            "I was a Marine. That was the identity I had built for myself, "
+            "brick by brick, since I was eighteen and too young to know "
+            "better and old enough to realize that the world didn't care "
+            "about my feelings."
+        )
+
+        chunks = split_synthesis_text(text)
+
+        self.assertEqual(
+            text.replace(" ", ""),
+            "".join(chunks).replace(" ", ""),
+        )
+        self.assertTrue(
+            all(ends_at_sentence_boundary(chunk) for chunk in chunks)
+        )
+        self.assertLessEqual(max(map(len, chunks)), 280)
+
+    def test_reports_non_sentence_boundary_without_pause(self) -> None:
+        self.assertFalse(ends_at_sentence_boundary("the world didn't"))
+        self.assertTrue(ends_at_sentence_boundary("The world didn't care."))
 
     def test_splits_unbroken_text_at_hard_limit(
         self,

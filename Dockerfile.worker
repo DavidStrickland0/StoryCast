@@ -33,6 +33,19 @@ RUN --mount=type=cache,target=/models/cache/pip \
         --force-reinstall \
         "chatterbox-tts @ https://github.com/resemble-ai/chatterbox/archive/5de7a54aa4e5e2baadb0182dde554908b48b85c2.zip"
 
+
+# Replace Chatterbox's pinned PyTorch build with an RTX 50-series build.
+RUN /opt/storycast/bin/python -m pip install \
+        --upgrade \
+        --force-reinstall \
+        --extra-index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.7.1+cu128 \
+        torchaudio==2.7.1+cu128
+
+# Restore pkg_resources required by Perth.
+RUN /opt/storycast/bin/python -m pip install \
+        --force-reinstall \
+        setuptools==80.9.0
 COPY tools /app/tools
 
 ENV PATH=/opt/storycast/bin:${PATH}

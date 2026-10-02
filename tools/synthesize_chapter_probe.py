@@ -15,6 +15,7 @@ import torch
 import torchaudio
 
 from audio_postprocessing import polish_audio
+from book_manifest import resolve_book_manifest
 from prosody import resolve_segment_synthesis_settings
 from pronunciations import (
     apply_pronunciations,
@@ -22,97 +23,37 @@ from pronunciations import (
     pronunciation_fingerprint,
 )
 from spoken_text import normalize_spoken_text
+from synthesis_chunking import ends_at_sentence_boundary, split_synthesis_text, parse_chunk_selector
 
 
 DEFAULT_NARRATOR_EXAGGERATION = 0.4
 DEFAULT_CHARACTER_EXAGGERATION = 0.65
 DEFAULT_CFG_WEIGHT = 0.5
 DEFAULT_TEMPERATURE = 0.7
-MAX_SYNTHESIS_CHARACTERS = 280
 CHUNK_PAUSE_SECONDS = 0.12
 HEADING_PAUSE_SECONDS = 1.25
 WORKER_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
 _CACHED_MODEL = None
 
 
-def split_synthesis_text(
-    text: str,
-    max_characters: int = MAX_SYNTHESIS_CHARACTERS,
-) -> list[str]:
-    if max_characters < 1:
-        raise ValueError(
-            "Maximum synthesis characters must be positive."
-        )
+def prepare_synthesis_text(text: str) -> str:
+    """Stabilize isolated one-word input without changing source text."""
+    words = re.findall(
+        r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?",
+        text,
+    )
 
-    if len(text) <= max_characters:
-        return [text.strip()]
+    if len(words) == 1:
+        return f"{words[0]}."
 
-    chunks: list[str] = []
-    cursor = 0
-
-    while cursor < len(text):
-        remaining = text[cursor:]
-
-        if len(remaining) <= max_characters:
-            chunk = remaining
-            cursor = len(text)
-        else:
-            window = text[
-                cursor:cursor + max_characters
-            ]
-
-            sentence_matches = list(
-                re.finditer(
-                    r'[.!?]["”’]?\s+',
-                    window,
-                )
-            )
-
-            minimum_boundary = max_characters // 2
-
-            sentence_end = next(
-                (
-                    match.end()
-                    for match in reversed(
-                        sentence_matches
-                    )
-                    if match.end() >= minimum_boundary
-                ),
-                None,
-            )
-
-            if sentence_end is not None:
-                end = cursor + sentence_end
-            else:
-                whitespace = window.rfind(
-                    " ",
-                    minimum_boundary,
-                )
-
-                end = (
-                    cursor + whitespace + 1
-                    if whitespace >= minimum_boundary
-                    else cursor + max_characters
-                )
-
-            chunk = text[cursor:end]
-            cursor = end
-
-        normalized = chunk.strip()
-
-        if normalized:
-            chunks.append(normalized)
-
-    return chunks
-
-
+    return text
 
 def load_markdown_headings(
     book: Path,
     chapter_id: str,
 ) -> set[str]:
     """Load spoken headings from the chapter Markdown."""
-    manifest = load_json(book / "book.json")
+    manifest = load_json(resolve_book_manifest(book))
     chapter_path: Path | None = None
 
     for chapter_value in manifest["chapters"]:
@@ -160,7 +101,12 @@ def split_synthesis_units(
             return
 
         for chunk in split_synthesis_text(ordinary_text):
-            units.append((chunk, CHUNK_PAUSE_SECONDS))
+            pause = (
+                CHUNK_PAUSE_SECONDS
+                if ends_at_sentence_boundary(chunk)
+                else 0.0
+            )
+            units.append((chunk, pause))
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -228,22 +174,6 @@ def file_sha256(path: Path) -> str:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def parse_chunk_selector(value: str) -> tuple[int, int]:
-    try:
-        segment_text, chunk_text = value.split(":", 1)
-        segment_index = int(segment_text)
-        chunk_index = int(chunk_text)
-    except (ValueError, TypeError) as exception:
-        raise argparse.ArgumentTypeError(
-            "Chunk selectors must use <segment-index>:<chunk-index>."
-        ) from exception
-    if segment_index < 0 or chunk_index < 0:
-        raise argparse.ArgumentTypeError(
-            "Chunk selector indexes must be nonnegative."
-        )
-    return segment_index, chunk_index
 
 
 def chunks_are_reusable(
@@ -434,6 +364,7 @@ def main(
             f"Chapter contains no segments: {args.chapter}"
         )
 
+    whole_segment_indexes = set(args.segment_index or [])
     selected_indexes = set(
         args.segment_index or []
     )
@@ -586,6 +517,15 @@ def main(
                 "Existing chapter checkpoint does not match "
                 "the current production script."
             )
+
+    if is_retry or is_resume:
+        checkpoint_segments = {item["index"]: item for item in manifest["segments"]}
+        segments = [dict(segment) for segment in segments]
+        for segment in segments:
+            checkpoint = checkpoint_segments.get(segment["index"], {})
+            for key in ("spokenText", "fragmentRewrite", "fragmentRewrites"):
+                if key in checkpoint:
+                    segment[key] = checkpoint[key]
 
     reused_segments = 0
 
@@ -765,6 +705,10 @@ def main(
         segment_index = segment["index"]
         speaker_id = segment["speakerId"]
         source_text = segment["sourceText"]
+        spoken_text = segment.get(
+            "spokenText",
+            source_text,
+        )
 
         if not source_text.strip():
             raise RuntimeError(
@@ -805,8 +749,12 @@ def main(
             args.attempt * 100000
         )
 
+        synthesis_text = prepare_synthesis_text(
+            normalize_spoken_text(spoken_text)
+        )
+
         synthesis_units = split_synthesis_units(
-            source_text,
+            synthesis_text,
             markdown_headings,
         )
 
@@ -848,7 +796,7 @@ def main(
         }
 
         if any(
-            not selected_chunks or
+            not selected_chunks or segment_index in whole_segment_indexes or
             (segment_index, chunk_index) in selected_chunks
             for chunk_index in range(len(synthesis_units))
         ):
@@ -867,7 +815,7 @@ def main(
                 f"segment-{segment_index:04d}-chunk-{chunk_index:04d}.wav"
             )
             regenerate_chunk = (
-                not selected_chunks or
+                not selected_chunks or segment_index in whole_segment_indexes or segment_index in whole_segment_indexes or
                 (segment_index, chunk_index) in selected_chunks
             )
             existing_chunk = existing_chunks.get(chunk_index)
@@ -1011,6 +959,8 @@ def main(
                 "voiceId": voice_id,
                 "synthesis": synthesis_settings,
                 "sourceText": source_text,
+            "spokenText": spoken_text,
+            "fragmentRewrites": segment.get("fragmentRewrites", []),
                 "pronunciationFingerprint":
                     pronunciation_fingerprint(
                         source_text,

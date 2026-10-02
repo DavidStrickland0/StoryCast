@@ -5,22 +5,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from faster_whisper import WhisperModel
-import torchaudio
-
-from audio_postprocessing import analyze_audio
 from pronunciations import (
     canonicalize_transcription,
     find_book_root,
     load_pronunciations,
 )
 from spoken_text import normalize_spoken_text
-
-from verify_voice_library import (
-    edit_distance,
-    normalize_words,
-)
-
 
 def load_json(path: Path) -> dict:
     with path.open(
@@ -58,31 +48,17 @@ def classify_verification(
     actual_words: list[str],
     word_error_rate: float,
 ) -> tuple[str, str]:
-    """Classify transcript accuracy or short-utterance audibility."""
+    """Classify transcript accuracy for every segment length."""
     if is_repeated_utterance(
         expected_words,
         actual_words,
     ):
         return "fail", "repeated-utterance"
-    if (
-        0 < len(expected_words) <= 5
-        and actual_words
-    ):
-        return "pass", "audibility-short-utterance"
-
     if word_error_rate <= 0.08:
         return "pass", "transcript"
 
     if word_error_rate <= 0.20:
         return "review", "transcript"
-
-    if (
-        len(expected_words) <= 10
-        and actual_words
-        and abs(len(expected_words) - len(actual_words)) <= 2
-        and edit_distance(expected_words, actual_words) <= 2
-    ):
-        return "review", "transcript-short-fragment"
 
     return "fail", "transcript"
 
@@ -93,6 +69,10 @@ def verify_audio(
     expected_text: str,
     pronunciations: list,
 ) -> dict:
+    import torchaudio
+    from audio_postprocessing import analyze_audio
+    from verify_voice_library import edit_distance, normalize_words
+
     audio, sample_rate = torchaudio.load(str(audio_path))
     audio_quality = analyze_audio(audio, sample_rate)
     transcription_segments, _ = model.transcribe(
@@ -155,6 +135,9 @@ def verify_audio(
 
 
 def main() -> int:
+    from faster_whisper import WhisperModel
+    from verify_voice_library import edit_distance, normalize_words
+
     parser = argparse.ArgumentParser(
         description="Verify a synthesized StoryCast chapter."
     )
@@ -166,11 +149,45 @@ def main() -> int:
         "--model",
         default="small.en",
     )
+    parser.add_argument(
+        "--segment-index",
+        type=int,
+        action="append",
+        default=None,
+    )
 
     args = parser.parse_args()
 
     manifest_path = args.chapter_manifest.resolve()
     manifest = load_json(manifest_path)
+
+    selected_indexes = (
+        set(args.segment_index)
+        if args.segment_index
+        else None
+    )
+
+    report_path = (
+        manifest_path.parent /
+        "verification.json"
+    )
+
+    existing_results: list[dict] = []
+
+    if (
+        selected_indexes is not None
+        and report_path.is_file()
+    ):
+        existing_report = load_json(report_path)
+        existing_results = [
+            segment
+            for segment in existing_report.get(
+                "segments",
+                [],
+            )
+            if int(segment["segmentIndex"])
+            not in selected_indexes
+        ]
     book = find_book_root(manifest_path)
     pronunciations = load_pronunciations(book)
     print(
@@ -184,15 +201,40 @@ def main() -> int:
         compute_type="float16",
     )
 
-    results: list[dict] = []
-    chunk_results: list[dict] = []
+    segments_to_verify = [
+        segment
+        for segment in manifest["segments"]
+        if (
+            selected_indexes is None
+            or int(segment["index"]) in selected_indexes
+        )
+    ]
+
+    results: list[dict] = list(
+        existing_results
+    )
+
+    chunk_results = [chunk for result in existing_results for chunk in result.get("chunks", [])]
 
     for position, segment in enumerate(
-        manifest["segments"],
+        segments_to_verify,
         start=1,
     ):
+        audio_path = Path(
+            segment["audioPath"]
+        ).resolve()
+
+        source_text = segment["sourceText"]
+        expected_text = segment.get(
+            "spokenText",
+            source_text,
+        )
+        was_rewritten = (
+            expected_text != source_text
+        )
+
         print(
-            f"[{position}/{len(manifest['segments'])}] "
+            f"[{position}/{len(segments_to_verify)}] "
             f"segment {segment['index']} | "
             f"{segment['speakerId']}",
             flush=True,
@@ -201,7 +243,7 @@ def main() -> int:
         chunks = segment.get("chunks") or [
             {
                 "index": 0,
-                "sourceText": segment["sourceText"],
+                "sourceText": expected_text,
                 "audioPath": segment["audioPath"],
             }
         ]
@@ -237,16 +279,51 @@ def main() -> int:
             if any(item["status"] == "review" for item in current_results)
             else "pass"
         )
+
+        if was_rewritten and status == "pass":
+            status = "review"
+            for result in current_results:
+                result["status"] = "review"
+                result["verificationMode"] = "ai-rewritten-short-utterance"
+        expected_count = sum(c["expectedWordCount"] for c in current_results)
+        distance = sum(c["editDistance"] for c in current_results)
+        verification_mode = "ai-rewritten-short-utterance" if was_rewritten and status == "review" else "transcript"
+        transcription = " ".join(c["transcription"] for c in current_results)
+        word_error_rate = distance / expected_count if expected_count else 1.0
         results.append(
             {
+                "chunks": current_results,
+                "expectedWordCount": expected_count,
+                "transcribedWordCount": sum(c["transcribedWordCount"] for c in current_results),
+                "editDistance": distance,
+                "wordErrorRate": word_error_rate,
                 "segmentIndex": segment["index"],
                 "speakerId": segment["speakerId"],
                 "voiceId": segment["voiceId"],
                 "status": status,
-                "chunks": current_results,
+                "verificationMode": verification_mode,
+                "sourceText": source_text,
+                "expectedText": expected_text,
+                "spokenText": expected_text,
+                "wasRewritten": was_rewritten,
+                "transcription": transcription,
+                "audioPath": str(audio_path),
             }
         )
 
+        print(
+            f"    WER={word_error_rate:.1%} | "
+            f"{status} | {verification_mode}",
+            flush=True,
+        )
+
+    results.sort(
+        key=lambda item: int(
+            item["segmentIndex"]
+        )
+    )
+
+    chunk_results.sort(key=lambda c: (int(c["segmentIndex"]), int(c["chunkIndex"])))
     summary = {
         "total": len(chunk_results),
         "passed": sum(
@@ -275,10 +352,6 @@ def main() -> int:
         "chunks": chunk_results,
     }
 
-    report_path = (
-        manifest_path.parent /
-        "verification.json"
-    )
 
     temporary_path = (
         manifest_path.parent /
