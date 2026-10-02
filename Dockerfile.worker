@@ -35,17 +35,19 @@ RUN --mount=type=cache,target=/models/cache/pip \
 
 
 # Replace Chatterbox's pinned PyTorch build with an RTX 50-series build.
-RUN /opt/storycast/bin/python -m pip install \
+RUN --mount=type=cache,target=/models/cache/pip \
+    /opt/storycast/bin/python -m pip install \
         --upgrade \
         --force-reinstall \
         --extra-index-url https://download.pytorch.org/whl/cu128 \
         torch==2.7.1+cu128 \
         torchaudio==2.7.1+cu128
 
-# Restore pkg_resources required by Perth.
+# Restore pkg_resources required by Perth and pin PyAV for faster-whisper 1.2.1.
 RUN /opt/storycast/bin/python -m pip install \
         --force-reinstall \
-        setuptools==80.9.0
+        setuptools==80.9.0 \
+        av==18.1.0
 COPY tools /app/tools
 
 ENV PATH=/opt/storycast/bin:${PATH}

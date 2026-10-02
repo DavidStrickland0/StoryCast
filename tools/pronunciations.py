@@ -5,22 +5,7 @@ import json
 import re
 from pathlib import Path
 
-
-def find_book_root(path: Path) -> Path:
-    """Find the nearest ancestor containing book.json."""
-    current = path.resolve()
-
-    if current.is_file():
-        current = current.parent
-
-    for candidate in (current, *current.parents):
-        if (candidate / "book.json").is_file():
-            return candidate
-
-    raise FileNotFoundError(
-        f"Could not locate book.json above: {path}"
-    )
-
+from book_manifest import find_book_root
 
 def load_pronunciations(book: Path) -> list[dict]:
     """Load and validate generic pronunciation entries."""

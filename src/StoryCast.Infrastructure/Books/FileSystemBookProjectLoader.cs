@@ -28,9 +28,18 @@ public sealed class FileSystemBookProjectLoader : IBookProjectLoader
 
         var resolvedPath = Path.GetFullPath(projectPath);
 
-        var manifestPath = Directory.Exists(resolvedPath)
-            ? Path.Combine(resolvedPath, ManifestFileName)
-            : resolvedPath;
+        var directoryPath = Directory.Exists(resolvedPath)
+            ? resolvedPath
+            : null;
+        var manifestPath = directoryPath is null
+            ? resolvedPath
+            : Path.Combine(directoryPath, ManifestFileName);
+
+        if (directoryPath is not null && !File.Exists(manifestPath))
+        {
+            manifestPath = Path.Combine(
+                directoryPath, "production", ManifestFileName);
+        }
 
         if (!File.Exists(manifestPath))
         {
@@ -40,7 +49,7 @@ public sealed class FileSystemBookProjectLoader : IBookProjectLoader
         }
 
         var rootPath =
-            Path.GetDirectoryName(manifestPath) ??
+            directoryPath ?? Path.GetDirectoryName(manifestPath) ??
             throw new InvalidDataException(
                 $"Book manifest has no parent directory: {manifestPath}");
 

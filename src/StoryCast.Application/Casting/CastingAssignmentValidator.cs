@@ -154,42 +154,31 @@ public sealed class CastingAssignmentValidator
         CharacterProfile character,
         VoiceProfile voice)
     {
-        var requiredPresentation =
-            character.VoicePresentation.Trim();
-
-        if (string.IsNullOrWhiteSpace(requiredPresentation) ||
-            string.Equals(
-                requiredPresentation,
-                "unspecified",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        if (!string.Equals(
-                requiredPresentation,
-                "male",
-                StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(
-                requiredPresentation,
-                "female",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException(
-                $"Character '{character.Id}' has unsupported voice " +
-                $"presentation '{character.VoicePresentation}'.");
-        }
-
-        if (!string.Equals(
-                requiredPresentation,
-                voice.Presentation,
-                StringComparison.OrdinalIgnoreCase))
+        if (!IsPresentationCompatible(character, voice))
         {
             throw new InvalidDataException(
                 $"Character '{character.Id}' requires a " +
-                $"'{requiredPresentation}' voice but was assigned " +
-                $"'{voice.Id}' with presentation " +
-                $"'{voice.Presentation}'.");
+                $"'{character.VoicePresentation.Trim()}' voice but was assigned " +
+                $"'{voice.Id}' with presentation '{voice.Presentation}'.");
         }
+    }
+
+    internal static bool IsPresentationCompatible(CharacterProfile character, VoiceProfile voice)
+    {
+        var requiredPresentation = character.VoicePresentation.Trim();
+        if (string.IsNullOrWhiteSpace(requiredPresentation) ||
+            string.Equals(requiredPresentation, "unspecified", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!string.Equals(requiredPresentation, "male", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(requiredPresentation, "female", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Character '{character.Id}' has unsupported voice presentation '{character.VoicePresentation}'.");
+        }
+
+        return string.Equals(requiredPresentation, voice.Presentation, StringComparison.OrdinalIgnoreCase);
     }
 }
