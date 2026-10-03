@@ -305,6 +305,14 @@ public sealed class AutomaticCastingService
             }
         }
 
+        if (roleIds.Length > 1)
+        {
+            Console.WriteLine("Automatic casting: batch attempts exhausted; assigning one role at a time.");
+            return await AssignIndividuallyAsync(
+                registry, availableVoices, existingAssignments,
+                roleIds, eligibleByRole, cancellationToken);
+        }
+
         throw new InvalidDataException(
             $"Automatic casting failed after {MaximumAttempts} attempts. " +
             $"Last failure: {lastFailure?.Message}",

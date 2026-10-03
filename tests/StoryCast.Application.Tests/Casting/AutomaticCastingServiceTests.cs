@@ -25,7 +25,8 @@ public sealed class AutomaticCastingServiceTests
         var service = new AutomaticCastingService(generator, new CastingAssignmentValidator());
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
-            service.AssignAsync(CreateRegistry("hero"), CreateVoices("voice-1", "voice-2"), []));
+            service.AssignAsync(CreateRegistry("hero"), CreateVoices("voice-1", "voice-2"),
+                [new CastingAssignment { CharacterId = "narrator", VoiceId = "voice-2", Confidence = 1, Rationale = "Existing" }]));
 
         Assert.Equal(3, generator.CallCount);
         Assert.Contains(expectedFailure, exception.Message, StringComparison.OrdinalIgnoreCase);

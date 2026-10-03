@@ -71,7 +71,8 @@ public sealed class AutomaticCastingEligibilityTests
         var invalid = Response(("receptionist", "male"), ("narrator", "female"));
         var generator = new Generator(invalid, invalid, invalid);
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => Service(generator).AssignAsync(
-            Registry("receptionist"), [Voice("female", "female"), Voice("male", "male")], []));
+            Registry("receptionist"), [Voice("female", "female"), Voice("male", "male")],
+            [new CastingAssignment { CharacterId = "narrator", VoiceId = "male", Confidence = 1, Rationale = "Existing" }]));
         Assert.Equal(3, generator.Calls);
         Assert.Contains("after 3 attempts", error.Message, StringComparison.Ordinal);
         Assert.Contains("allowed voice IDs", error.Message, StringComparison.Ordinal);
@@ -178,6 +179,25 @@ public sealed class AutomaticCastingEligibilityTests
         Assert.Equal(4, result.Select(item => item.VoiceId).Distinct().Count());
         Assert.All(result, assignment => Assert.InRange(assignment.Confidence, 0m, 1m));
         Assert.Equal("male", result.Single(item => item.CharacterId == "narrator").VoiceId);
+    }
+
+    /// <summary>Recovers invalid batch responses without replacing existing narration.</summary>
+    [Fact]
+    public async Task AssignAsync_BatchExhausted_CastsIndividually()
+    {
+        var invalid = Response(("a", "female1"), ("a", "female2"));
+        var generator = new Generator(invalid, invalid, invalid,
+            JsonSerializer.Serialize(new { voiceId = "female1", confidence = 0.9, rationale = "Suitable" }),
+            JsonSerializer.Serialize(new { voiceId = "female2", confidence = 0.9, rationale = "Suitable" }));
+        var narrator = new CastingAssignment { CharacterId = "narrator", VoiceId = "male", Confidence = 1, Rationale = "Existing", IsLocked = true };
+        var result = await Service(generator).AssignAsync(
+            Registry("a", "b"),
+            [Voice("female1", "female"), Voice("female2", "female"), Voice("male", "male")], [narrator]);
+        Assert.Equal(5, generator.Calls);
+        Assert.Equal(new[] { "a", "b" }, result.Select(item => item.CharacterId).ToArray());
+        Assert.Equal(2, result.Select(item => item.VoiceId).Distinct().Count());
+        Assert.True(narrator.IsLocked);
+        Assert.Equal("male", narrator.VoiceId);
     }
 
     private static CharacterRegistry Registry(params string[] ids) => new()
