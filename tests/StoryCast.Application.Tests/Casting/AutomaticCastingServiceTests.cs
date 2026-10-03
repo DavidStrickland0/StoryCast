@@ -12,6 +12,34 @@ namespace StoryCast.Application.Tests.Casting;
 public sealed class AutomaticCastingServiceTests
 {
     /// <summary>
+    /// Keeps the actual validation failure visible to command-line callers.
+    /// </summary>
+    [Theory]
+    [InlineData("{", "invalid JSON")]
+    [InlineData("{\"assignments\":[]}", "missing required roles")]
+    public async Task AssignAsync_RejectedAttempts_ReportsLastFailure(
+        string response,
+        string expectedFailure)
+    {
+        var generator = new SequenceStructuredTextGenerator(response, response, response);
+        var service = new AutomaticCastingService(generator, new CastingAssignmentValidator());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            service.AssignAsync(CreateRegistry("hero"), CreateVoices("voice-1", "voice-2"), []));
+
+        Assert.Equal(3, generator.CallCount);
+        Assert.Contains(expectedFailure, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(exception.InnerException);
+        Assert.Contains(exception.InnerException.Message, exception.Message, StringComparison.Ordinal);
+        Assert.Contains(expectedFailure, generator.UserPrompts[1], StringComparison.OrdinalIgnoreCase);
+        Assert.All(generator.Schemas, schema => Assert.Equal(
+            600,
+            schema.GetProperty("properties").GetProperty("assignments")
+                .GetProperty("items").GetProperty("properties")
+                .GetProperty("rationale").GetProperty("maxLength").GetInt32()));
+    }
+
+    /// <summary>
     /// Verifies that duplicate roles from the model are rejected and retried.
     /// </summary>
     [Fact]
@@ -224,6 +252,8 @@ public sealed class AutomaticCastingServiceTests
 
         public List<string> UserPrompts { get; } = [];
 
+        public List<JsonElement> Schemas { get; } = [];
+
         public Task<string> GenerateAsync(
             string systemPrompt,
             string userPrompt,
@@ -232,6 +262,7 @@ public sealed class AutomaticCastingServiceTests
         {
             CallCount++;
             UserPrompts.Add(userPrompt);
+            Schemas.Add(jsonSchema.Clone());
 
             if (responses.Count == 0)
             {

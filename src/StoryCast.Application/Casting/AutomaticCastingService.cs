@@ -30,6 +30,7 @@ public sealed class AutomaticCastingService
 
         Confidence must reflect the available evidence. Rationale must briefly
         explain the match using only supplied character and voice metadata.
+        Keep each rationale to one or two sentences, at most 600 characters.
         Return only JSON matching the supplied schema.
         """;
 
@@ -191,6 +192,9 @@ public sealed class AutomaticCastingService
              attempt <= MaximumAttempts;
              attempt++)
         {
+            Console.WriteLine(
+                $"Automatic casting: attempt {attempt}/{MaximumAttempts} " +
+                $"for {roleIds.Length} roles using {availableVoices.Length} eligible voices...");
             var responseText = await generator.GenerateAsync(
                 SystemPrompt,
                 attemptPrompt,
@@ -227,9 +231,11 @@ public sealed class AutomaticCastingService
                 return assignments;
             }
             catch (InvalidDataException exception)
-                when (attempt < MaximumAttempts)
             {
                 lastFailure = exception;
+                Console.WriteLine(
+                    $"Automatic casting: attempt {attempt}/{MaximumAttempts} " +
+                    $"rejected: {exception.Message}");
 
                 attemptPrompt =
                     $"""
@@ -244,14 +250,11 @@ public sealed class AutomaticCastingService
                     role list.
                     """;
             }
-            catch (InvalidDataException exception)
-            {
-                lastFailure = exception;
-            }
         }
 
         throw new InvalidDataException(
-            $"Automatic casting failed after {MaximumAttempts} attempts.",
+            $"Automatic casting failed after {MaximumAttempts} attempts. " +
+            $"Last failure: {lastFailure?.Message}",
             lastFailure);
     }
 
@@ -273,7 +276,7 @@ public sealed class AutomaticCastingService
         catch (JsonException exception)
         {
             throw new InvalidDataException(
-                "Automatic casting returned invalid JSON.",
+                $"Automatic casting returned invalid JSON: {exception.Message}",
                 exception);
         }
 
@@ -339,7 +342,8 @@ public sealed class AutomaticCastingService
                                 },
                                 rationale = new
                                 {
-                                    type = "string"
+                                    type = "string",
+                                    maxLength = 600
                                 }
                             },
                             required = new[]
