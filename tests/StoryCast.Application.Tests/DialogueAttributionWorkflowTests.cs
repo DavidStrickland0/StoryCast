@@ -15,6 +15,55 @@ namespace StoryCast.Application.Tests.Attribution;
 public sealed class DialogueAttributionWorkflowTests
 {
     /// <summary>
+    /// Verifies that a changed chapter source replaces its previously stored script.
+    /// </summary>
+    /// <returns>A task representing the asynchronous test operation.</returns>
+    [Fact]
+    public async Task ExecuteAsync_ChangedSource_ReplacesScript()
+    {
+        var preparer = new ChapterTextPreparer();
+        var scriptStore = new MemoryProductionScriptStore();
+        var originalBook = CreateBook();
+        var originalWorkflow = new DialogueAttributionWorkflow(
+            preparer,
+            new ProductionScriptSegmenter(),
+            new StubDialogueAttributionService(),
+            new DialogueAttributionApplicator(),
+            new MemoryCharacterRegistryStore(
+                CreateRegistry(originalBook, preparer)),
+            scriptStore);
+
+        await originalWorkflow.ExecuteAsync(
+            originalBook,
+            chapterId: "chapter-002");
+        var originalHash = scriptStore.Artifact!.SourceSha256;
+
+        var revisedBook = CreateBook(
+            "Thorne answered, \"Moving with the child.\"");
+        var revisedWorkflow = new DialogueAttributionWorkflow(
+            preparer,
+            new ProductionScriptSegmenter(),
+            new StubDialogueAttributionService(),
+            new DialogueAttributionApplicator(),
+            new MemoryCharacterRegistryStore(
+                CreateRegistry(revisedBook, preparer)),
+            scriptStore);
+
+        var result = await revisedWorkflow.ExecuteAsync(
+            revisedBook,
+            chapterId: "chapter-002");
+
+        Assert.Equal(1, result.ProcessedChapters);
+        Assert.Equal(2, scriptStore.SaveCount);
+        Assert.NotEqual(originalHash, scriptStore.Artifact!.SourceSha256);
+        Assert.Contains(
+            "Moving with the child.",
+            string.Concat(
+                scriptStore.Artifact.Script.Segments.Select(
+                    segment => segment.SourceText)));
+    }
+
+    /// <summary>
     /// Verifies that only the requested chapter is attributed and persisted.
     /// </summary>
     [Fact]
@@ -74,7 +123,8 @@ public sealed class DialogueAttributionWorkflowTests
             dialogue.SpeakerId);
     }
 
-    private static BookProject CreateBook()
+    private static BookProject CreateBook(
+        string chapterTwoText = "Thorne answered, \"Moving.\"")
     {
         return new BookProject
         {
@@ -109,7 +159,7 @@ public sealed class DialogueAttributionWorkflowTests
                             @"C:\Book\chapter-002.md",
                         Format = ManuscriptFormat.Markdown,
                         RawText =
-                            "Thorne answered, \"Moving.\""
+                            chapterTwoText
                     }
                 ]
             }
@@ -233,7 +283,7 @@ public sealed class DialogueAttributionWorkflowTests
             LoadedChapterId = chapterId;
 
             return Task.FromResult<ChapterProductionArtifact?>(
-                null);
+                Artifact);
         }
 
         public Task SaveAsync(

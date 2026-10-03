@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import unittest
 
@@ -6,19 +6,53 @@ from verify_chapter_probe import classify_verification
 
 
 class VerificationClassificationTests(unittest.TestCase):
-    def test_passes_audible_one_word_utterance(self) -> None:
+    def test_currency_mismatch_fails_even_when_overall_wer_passes(self) -> None:
+        self.assertEqual(
+            ("fail", "currency-amount-mismatch"),
+            classify_verification(
+                ["otherwise"] * 48, ["otherwise"] * 48, 0.0625,
+                "The balance is $2,487.63.", "The balance is $2.48, $7.63.",
+            ),
+        )
+        self.assertEqual(
+            ("fail", "currency-amount-mismatch"),
+            classify_verification([], [], 0.0, "He owes $2,487.63.", "He owes money."),
+        )
+
+    def test_currency_amount_accepts_equivalent_spoken_form(self) -> None:
+        self.assertEqual(
+            ("pass", "transcript"),
+            classify_verification(
+                [], [], 0.0, "He owes $2,487.63.",
+                "He owes two thousand four hundred eighty-seven dollars and sixty-three cents.",
+            ),
+        )
+
+    def test_rejects_inaccurate_one_word_utterance(self) -> None:
         status, mode = classify_verification(
             ["sak"],
             ["sock"],
             1.0,
         )
 
-        self.assertEqual("pass", status)
+        self.assertEqual("fail", status)
         self.assertEqual(
-            "audibility-short-utterance",
+            "transcript",
             mode,
         )
 
+    def test_accepts_exact_one_word_utterance(self) -> None:
+        status, mode = classify_verification(
+            ["miller"],
+            ["miller"],
+            0.0,
+        )
+
+        self.assertEqual("pass", status)
+        self.assertEqual(
+            "transcript",
+            mode,
+        )
     def test_rejects_silent_short_utterance(self) -> None:
         status, mode = classify_verification(
             ["sak"],
@@ -46,18 +80,30 @@ class VerificationClassificationTests(unittest.TestCase):
         self.assertEqual("fail", status)
         self.assertEqual("transcript", mode)
 
-    def test_passes_audible_five_word_fragment(self) -> None:
+    def test_short_fragment_above_review_threshold_fails(self) -> None:
         status, mode = classify_verification(
             ["elias", "said", "his", "tone", "sharp"],
             ["elias", "said", "tone"],
             0.40,
         )
 
-        self.assertEqual("pass", status)
+        self.assertEqual("fail", status)
         self.assertEqual(
-            "audibility-short-utterance",
+            "transcript",
             mode,
         )
+
+    def test_short_and_long_fragments_share_review_threshold(self) -> None:
+        for expected, actual in [
+            (["one", "two", "three", "four", "five"],
+             ["one", "two", "three", "four", "six"]),
+            (["one"] * 10, ["one"] * 9 + ["two"]),
+        ]:
+            with self.subTest(word_count=len(expected)):
+                self.assertEqual(
+                    ("review", "transcript"),
+                    classify_verification(expected, actual, 0.20),
+                )
 
     def test_rejects_repeated_short_utterance(self) -> None:
         status, mode = classify_verification(

@@ -7,6 +7,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from book_manifest import resolve_book_manifest
 
 DEFAULT_BITRATE = "128k"
 
@@ -184,7 +185,7 @@ def main() -> int:
     args = parser.parse_args()
 
     book = args.book.resolve()
-    book_manifest_path = book / "book.json"
+    book_manifest_path = resolve_book_manifest(book)
     mastered_audio = args.mastered_audio.resolve()
 
     if not book_manifest_path.is_file():

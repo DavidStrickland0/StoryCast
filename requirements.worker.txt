@@ -1,10 +1,9 @@
 --extra-index-url https://download.pytorch.org/whl/cu126
 
-setuptools==80.9.0
-
 torch==2.6.0+cu126
 torchaudio==2.6.0+cu126
 chatterbox-tts==0.1.7
+resemble-perth @ https://github.com/resemble-ai/Perth/archive/ff1c8ac55a976971245cdd53c18d6131ca00d993.zip
 faster-whisper==1.2.1
 numpy==1.26.4
 soundfile==0.14.0

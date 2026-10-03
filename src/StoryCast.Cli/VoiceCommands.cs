@@ -1,5 +1,4 @@
 using System.Text.Json;
-using StoryCast.Application.Voices;
 using StoryCast.Infrastructure.Voices;
 
 internal static class VoiceCommands
@@ -72,77 +71,59 @@ internal static class VoiceCommands
 
             libraryPath = Path.GetFullPath(libraryPath);
 
-            var outputPath =
-                GetOptionValue(args, "--output") ??
-                Path.Combine(
-                    libraryPath,
-                    "voice-analysis.json");
+            var workerImage =
+                GetOptionValue(args, "--worker-image") ??
+                "storycast-worker:dev";
 
-            outputPath = Path.GetFullPath(outputPath);
-
-            IVoiceLibrary voiceLibrary =
-                new FileSystemVoiceLibrary();
-
-            IVoiceSampleAnalyzer analyzer =
-                new FfmpegVoiceSampleAnalyzer();
-
-            var voices = await voiceLibrary.LoadAsync(
-                libraryPath);
-
-            if (voices.Count == 0)
+            if (!Directory.Exists(libraryPath))
             {
-                Console.Error.WriteLine(
-                    "The voice library contains no voices.");
-
-                return 1;
+                throw new DirectoryNotFoundException(
+                    $"Voice library was not found: {libraryPath}");
             }
 
-            Console.WriteLine($"Voice library: {libraryPath}");
-            Console.WriteLine($"Voices:        {voices.Count}");
-            Console.WriteLine("Analyzing samples...");
-            Console.WriteLine();
+            var runtime = new DockerWorkerRuntime(
+                null,
+                libraryPath,
+                workerImage,
+                libraryReadOnly: false);
 
-            var analyses =
-                new List<VoiceSampleAnalysis>(voices.Count);
-
-            foreach (var voice in voices.OrderBy(
-                         voice => voice.Id,
-                         StringComparer.OrdinalIgnoreCase))
+            var arguments = new List<string>
             {
-                var analysis = await analyzer.AnalyzeAsync(
-                    voice);
-
-                analyses.Add(analysis);
-
-                Console.WriteLine(
-                    $"[{analyses.Count,2}/{voices.Count}] " +
-                    $"{voice.Id}  " +
-                    $"{analysis.DurationSeconds:0.00}s  " +
-                    $"{analysis.MeanVolumeDb:0.0} dB mean  " +
-                    $"{analysis.PeakVolumeDb:0.0} dB peak");
-            }
-
-            var report = new VoiceLibraryAnalysisReport
-            {
-                SchemaVersion = 1,
-                GeneratedUtc = DateTimeOffset.UtcNow,
-                Voices = analyses
+                runtime.LibraryPath
             };
 
-            await SaveReportAsync(
-                outputPath,
-                report);
+            var outputValue = GetOptionValue(args, "--output");
+            if (outputValue is not null)
+            {
+                var outputPath = Path.GetFullPath(outputValue);
+                var relativeOutput = Path.GetRelativePath(
+                    libraryPath,
+                    outputPath);
 
-            var clippingRisks = analyses.Count(
-                analysis => analysis.HasClippingRisk);
+                if (Path.IsPathRooted(relativeOutput) ||
+                    relativeOutput == ".." ||
+                    relativeOutput.StartsWith(
+                        $"..{Path.DirectorySeparatorChar}",
+                        StringComparison.Ordinal))
+                {
+                    throw new ArgumentException(
+                        "The analysis output must be inside the voice library.");
+                }
 
+                arguments.Add("--output");
+                arguments.Add(
+                    $"{runtime.LibraryPath}/" +
+                    relativeOutput.Replace('\\', '/'));
+            }
+
+            Console.WriteLine(
+                "Starting Docker voice analysis...");
             Console.WriteLine();
-            Console.WriteLine("Voice analysis complete.");
-            Console.WriteLine($"Analyzed:      {analyses.Count}");
-            Console.WriteLine($"Clipping risk: {clippingRisks}");
-            Console.WriteLine($"Report:        {outputPath}");
 
-            return 0;
+            return await runtime.RunAsync(
+                "analyze_voice_library.py",
+                arguments,
+                useGpu: false);
         }
         catch (Exception exception) when (
             exception is IOException or
@@ -159,66 +140,6 @@ internal static class VoiceCommands
         {
             Console.Error.WriteLine(exception.Message);
             return 1;
-        }
-    }
-
-    private static async Task SaveReportAsync(
-        string outputPath,
-        VoiceLibraryAnalysisReport report)
-    {
-        var parentDirectory =
-            Path.GetDirectoryName(outputPath) ??
-            throw new InvalidDataException(
-                $"Analysis report has no parent directory: " +
-                outputPath);
-
-        Directory.CreateDirectory(parentDirectory);
-
-        var temporaryPath = Path.Combine(
-            parentDirectory,
-            $".voice-analysis-{Guid.NewGuid():N}.tmp");
-
-        try
-        {
-            await using (var stream = new FileStream(
-                             temporaryPath,
-                             FileMode.CreateNew,
-                             FileAccess.Write,
-                             FileShare.None))
-            {
-                await JsonSerializer.SerializeAsync(
-                    stream,
-                    report,
-                    SerializerOptions);
-
-                await stream.WriteAsync(
-                    Environment.NewLine
-                        .Select(character => (byte)character)
-                        .ToArray());
-
-                await stream.FlushAsync();
-            }
-
-            if (File.Exists(outputPath))
-            {
-                File.Replace(
-                    temporaryPath,
-                    outputPath,
-                    destinationBackupFileName: null);
-            }
-            else
-            {
-                File.Move(
-                    temporaryPath,
-                    outputPath);
-            }
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
         }
     }
 

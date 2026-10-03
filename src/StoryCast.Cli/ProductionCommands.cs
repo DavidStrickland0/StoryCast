@@ -47,6 +47,20 @@ internal static class ProductionCommands
                     "--whisper-model") ??
                 "small.en";
 
+            var rewriteModel =
+                GetOptionValue(
+                    args,
+                    "--rewrite-model") ??
+                Environment.GetEnvironmentVariable(
+                    "STORYCAST_OLLAMA_MODEL") ??
+                "qwen3.8:27b";
+
+            var ollamaUrl =
+                GetOptionValue(
+                    args,
+                    "--ollama-url") ??
+                "http://host.docker.internal:11434/";
+
             var runDirectoryValue =
                 GetOptionValue(
                     args,
@@ -142,6 +156,8 @@ internal static class ProductionCommands
             Console.WriteLine($"Chapter:       {chapterId}");
             Console.WriteLine($"Voice library: {libraryPath}");
             Console.WriteLine($"Whisper:       {whisperModel}");
+            Console.WriteLine($"Rewrite model: {rewriteModel}");
+            Console.WriteLine($"Ollama:        {ollamaUrl}");
 
             if (runDirectoryPath is not null)
             {
@@ -168,6 +184,8 @@ internal static class ProductionCommands
                 runtime.LibraryPath,
                 chapterId,
                 whisperModel,
+                rewriteModel,
+                ollamaUrl,
                 containerRunDirectoryPath,
                 containerResumeRunPath);
 
@@ -203,6 +221,8 @@ internal static class ProductionCommands
                     runtime.LibraryPath,
                     chapterId,
                     whisperModel,
+                    rewriteModel,
+                    ollamaUrl,
                     runDirectoryPath: null,
                     resumeRunPath: retryResumePath);
             }
@@ -272,6 +292,8 @@ internal static class ProductionCommands
         string libraryPath,
         string chapterId,
         string whisperModel,
+        string rewriteModel,
+        string ollamaUrl,
         string? runDirectoryPath,
         string? resumeRunPath)
     {
@@ -282,7 +304,11 @@ internal static class ProductionCommands
             "--chapter",
             chapterId,
             "--whisper-model",
-            whisperModel
+            whisperModel,
+            "--rewrite-model",
+            rewriteModel,
+            "--ollama-url",
+            ollamaUrl
         };
 
         if (runDirectoryPath is not null)

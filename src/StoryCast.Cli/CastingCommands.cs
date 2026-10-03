@@ -138,7 +138,8 @@ internal static class CastingCommands
             return 0;
         }
         catch (Exception exception) when (
-            exception is IOException or
+            exception is InvalidDataException or
+            IOException or
             HttpRequestException or
             UnauthorizedAccessException or
             UriFormatException)

@@ -23,15 +23,36 @@ WORKDIR /app
 
 COPY requirements.worker.txt /app/requirements.worker.txt
 
-RUN python3.12 -m venv /opt/storycast \
-    && /opt/storycast/bin/python -m pip install --upgrade pip "setuptools<81" wheel \
+RUN --mount=type=cache,target=/models/cache/pip \
+    python3.12 -m venv /opt/storycast \
+    && /opt/storycast/bin/python -m pip install --upgrade pip setuptools wheel \
     && /opt/storycast/bin/python -m pip install \
-        --requirement /app/requirements.worker.txt
+        --requirement /app/requirements.worker.txt \
+    && /opt/storycast/bin/python -m pip install \
+        --no-deps \
+        --force-reinstall \
+        "chatterbox-tts @ https://github.com/resemble-ai/chatterbox/archive/5de7a54aa4e5e2baadb0182dde554908b48b85c2.zip"
 
+
+# Replace Chatterbox's pinned PyTorch build with an RTX 50-series build.
+RUN --mount=type=cache,target=/models/cache/pip \
+    /opt/storycast/bin/python -m pip install \
+        --upgrade \
+        --force-reinstall \
+        --extra-index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.7.1+cu128 \
+        torchaudio==2.7.1+cu128
+
+# Restore pkg_resources required by Perth and pin PyAV for faster-whisper 1.2.1.
+RUN /opt/storycast/bin/python -m pip install \
+        --force-reinstall \
+        setuptools==80.9.0 \
+        av==18.1.0
 COPY tools /app/tools
 
 ENV PATH=/opt/storycast/bin:${PATH}
 ENV PYTHONPATH=/app/tools
+ENV PKUSEG_HOME=/models/pkuseg
 
 VOLUME ["/books", "/voices", "/models"]
 

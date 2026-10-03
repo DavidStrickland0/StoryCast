@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import gc
+import hashlib
 import json
 import re
+import sys
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,101 +14,46 @@ from pathlib import Path
 import torch
 import torchaudio
 
+from audio_postprocessing import polish_audio
+from book_manifest import resolve_book_manifest
 from prosody import resolve_segment_synthesis_settings
 from pronunciations import (
     apply_pronunciations,
     load_pronunciations,
     pronunciation_fingerprint,
 )
+from spoken_text import normalize_spoken_text
+from synthesis_chunking import ends_at_sentence_boundary, split_synthesis_text, parse_chunk_selector
 
 
 DEFAULT_NARRATOR_EXAGGERATION = 0.4
 DEFAULT_CHARACTER_EXAGGERATION = 0.65
 DEFAULT_CFG_WEIGHT = 0.5
 DEFAULT_TEMPERATURE = 0.7
-MAX_SYNTHESIS_CHARACTERS = 280
 CHUNK_PAUSE_SECONDS = 0.12
 HEADING_PAUSE_SECONDS = 1.25
+WORKER_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
+_CACHED_MODEL = None
 
 
-def split_synthesis_text(
-    text: str,
-    max_characters: int = MAX_SYNTHESIS_CHARACTERS,
-) -> list[str]:
-    if max_characters < 1:
-        raise ValueError(
-            "Maximum synthesis characters must be positive."
-        )
+def prepare_synthesis_text(text: str) -> str:
+    """Stabilize isolated one-word input without changing source text."""
+    words = re.findall(
+        r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?",
+        text,
+    )
 
-    if len(text) <= max_characters:
-        return [text.strip()]
+    if len(words) == 1:
+        return f"{words[0]}."
 
-    chunks: list[str] = []
-    cursor = 0
-
-    while cursor < len(text):
-        remaining = text[cursor:]
-
-        if len(remaining) <= max_characters:
-            chunk = remaining
-            cursor = len(text)
-        else:
-            window = text[
-                cursor:cursor + max_characters
-            ]
-
-            sentence_matches = list(
-                re.finditer(
-                    r'[.!?]["”’]?\s+',
-                    window,
-                )
-            )
-
-            minimum_boundary = max_characters // 2
-
-            sentence_end = next(
-                (
-                    match.end()
-                    for match in reversed(
-                        sentence_matches
-                    )
-                    if match.end() >= minimum_boundary
-                ),
-                None,
-            )
-
-            if sentence_end is not None:
-                end = cursor + sentence_end
-            else:
-                whitespace = window.rfind(
-                    " ",
-                    minimum_boundary,
-                )
-
-                end = (
-                    cursor + whitespace + 1
-                    if whitespace >= minimum_boundary
-                    else cursor + max_characters
-                )
-
-            chunk = text[cursor:end]
-            cursor = end
-
-        normalized = chunk.strip()
-
-        if normalized:
-            chunks.append(normalized)
-
-    return chunks
-
-
+    return text
 
 def load_markdown_headings(
     book: Path,
     chapter_id: str,
 ) -> set[str]:
     """Load spoken headings from the chapter Markdown."""
-    manifest = load_json(book / "book.json")
+    manifest = load_json(resolve_book_manifest(book))
     chapter_path: Path | None = None
 
     for chapter_value in manifest["chapters"]:
@@ -152,7 +101,12 @@ def split_synthesis_units(
             return
 
         for chunk in split_synthesis_text(ordinary_text):
-            units.append((chunk, CHUNK_PAUSE_SECONDS))
+            pause = (
+                CHUNK_PAUSE_SECONDS
+                if ends_at_sentence_boundary(chunk)
+                else 0.0
+            )
+            units.append((chunk, pause))
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -214,6 +168,40 @@ def write_json_atomic(
     temporary_path.replace(path)
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def chunks_are_reusable(
+    segment: dict,
+    synthesis_units: list[tuple[str, float]],
+    chapter_directory: Path,
+) -> bool:
+    chunks = segment.get("chunks", [])
+    if len(chunks) != len(synthesis_units):
+        return False
+    for chunk_index, (text, pause) in enumerate(synthesis_units):
+        chunk = chunks[chunk_index]
+        path = (
+            chapter_directory /
+            f"segment-{segment['index']:04d}-chunk-{chunk_index:04d}.wav"
+        ).resolve()
+        if (
+            chunk.get("index") != chunk_index or
+            chunk.get("sourceText") != text or
+            chunk.get("pauseAfterSeconds") != pause or
+            Path(chunk.get("audioPath", "")).resolve() != path or
+            not path.is_file() or
+            chunk.get("sha256") != file_sha256(path)
+        ):
+            return False
+    return True
+
+
 def load_voice_samples(
     library: Path,
 ) -> dict[str, Path]:
@@ -267,7 +255,31 @@ def create_run_directory(book: Path) -> Path:
     return run_directory
 
 
-def main() -> int:
+def move_model(model, device: str) -> None:
+    model.t3.to(device)
+    model.s3gen.to(device)
+    model.ve.to(device)
+
+    if model.conds is not None:
+        model.conds = model.conds.to(device)
+
+    model.device = device
+
+
+def park_cached_model() -> None:
+    if _CACHED_MODEL is None:
+        return
+
+    move_model(_CACHED_MODEL, "cpu")
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def main(
+    arguments: list[str] | None = None,
+) -> int:
     parser = argparse.ArgumentParser(
         description="Synthesize one complete StoryCast chapter."
     )
@@ -300,12 +312,19 @@ def main() -> int:
         default=None,
     )
     parser.add_argument(
+        "--chunk",
+        type=parse_chunk_selector,
+        action="append",
+        default=None,
+        help="Regenerate one chunk as <segment-index>:<chunk-index>.",
+    )
+    parser.add_argument(
         "--attempt",
         type=int,
         default=0,
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(arguments)
 
     book = args.book.resolve()
 
@@ -345,10 +364,16 @@ def main() -> int:
             f"Chapter contains no segments: {args.chapter}"
         )
 
+    whole_segment_indexes = set(args.segment_index or [])
     selected_indexes = set(
         args.segment_index or []
     )
-    is_retry = bool(selected_indexes)
+    selected_chunks = set(args.chunk or [])
+    selected_indexes.update(
+        segment_index
+        for segment_index, _ in selected_chunks
+    )
+    is_retry = bool(selected_indexes or selected_chunks)
     is_resume = args.resume
 
     if is_retry and is_resume:
@@ -452,6 +477,23 @@ def main() -> int:
         manifest = load_json(
             manifest_path
         )
+
+        chunks_by_segment = {
+            segment["index"]: {
+                chunk["index"]
+                for chunk in segment.get("chunks", [])
+            }
+            for segment in manifest.get("segments", [])
+        }
+        unknown_chunks = [
+            selector
+            for selector in selected_chunks
+            if selector[1] not in chunks_by_segment.get(selector[0], set())
+        ]
+        if unknown_chunks:
+            raise RuntimeError(
+                f"Unknown chunk selectors: {sorted(unknown_chunks)}"
+            )
     elif is_resume and manifest_path.is_file():
         manifest = load_json(
             manifest_path
@@ -475,6 +517,15 @@ def main() -> int:
                 "Existing chapter checkpoint does not match "
                 "the current production script."
             )
+
+    if is_retry or is_resume:
+        checkpoint_segments = {item["index"]: item for item in manifest["segments"]}
+        segments = [dict(segment) for segment in segments]
+        for segment in segments:
+            checkpoint = checkpoint_segments.get(segment["index"], {})
+            for key in ("spokenText", "fragmentRewrite", "fragmentRewrites"):
+                if key in checkpoint:
+                    segment[key] = checkpoint[key]
 
     reused_segments = 0
 
@@ -549,7 +600,14 @@ def main() -> int:
                     segment_pronunciation_fingerprint and
                 existing.get("sourceText") ==
                     segment["sourceText"] and
-                existing.get("attempt") == 0 and
+                chunks_are_reusable(
+                    existing,
+                    split_synthesis_units(
+                        segment["sourceText"],
+                        markdown_headings,
+                    ),
+                    chapter_directory,
+                ) and
                 Path(
                     existing.get(
                         "audioPath",
@@ -606,20 +664,32 @@ def main() -> int:
     print(f"Attempt:  {args.attempt}", flush=True)
     print(f"Reused:   {reused_segments}", flush=True)
     print(f"Device:   {device}", flush=True)
+    global _CACHED_MODEL
     model = None
 
     if segments:
-        from chatterbox.tts import ChatterboxTTS
+        if _CACHED_MODEL is None:
+            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-        print()
-        print(
-            "Loading Chatterbox...",
-            flush=True,
-        )
+            print()
+            print(
+                "Loading Chatterbox...",
+                flush=True,
+            )
 
-        model = ChatterboxTTS.from_pretrained(
-            device=device
-        )
+            _CACHED_MODEL = ChatterboxMultilingualTTS.from_pretrained(
+                device=device,
+                t3_model="v3",
+            )
+        else:
+            print()
+            print(
+                "Reusing Chatterbox model...",
+                flush=True,
+            )
+            move_model(_CACHED_MODEL, device)
+
+        model = _CACHED_MODEL
 
     generated_segments: list[dict] = []
 
@@ -635,6 +705,10 @@ def main() -> int:
         segment_index = segment["index"]
         speaker_id = segment["speakerId"]
         source_text = segment["sourceText"]
+        spoken_text = segment.get(
+            "spokenText",
+            source_text,
+        )
 
         if not source_text.strip():
             raise RuntimeError(
@@ -675,8 +749,12 @@ def main() -> int:
             args.attempt * 100000
         )
 
+        synthesis_text = prepare_synthesis_text(
+            normalize_spoken_text(spoken_text)
+        )
+
         synthesis_units = split_synthesis_units(
-            source_text,
+            synthesis_text,
             markdown_headings,
         )
 
@@ -699,55 +777,141 @@ def main() -> int:
         )
 
         generated_chunks: list[torch.Tensor] = []
+        chunk_records: list[dict] = []
+        existing_segment = next(
+            (
+                item
+                for item in manifest["segments"]
+                if item["index"] == segment_index
+            ),
+            None,
+        )
+        existing_chunks = {
+            item["index"]: item
+            for item in (
+                existing_segment.get("chunks", [])
+                if existing_segment is not None
+                else []
+            )
+        }
+
+        if any(
+            not selected_chunks or segment_index in whole_segment_indexes or
+            (segment_index, chunk_index) in selected_chunks
+            for chunk_index in range(len(synthesis_units))
+        ):
+            model.prepare_conditionals(
+                str(voice_sample),
+                exaggeration=synthesis_settings["exaggeration"],
+            )
 
         for chunk_index, synthesis_unit in enumerate(
             synthesis_units
         ):
             chunk_text, pause_after_seconds = synthesis_unit
             chunk_seed = seed + chunk_index
-
-            print(
-                f"  chunk {chunk_index + 1}/"
-                f"{len(synthesis_units)} | "
-                f"{len(chunk_text)} characters",
-                flush=True,
+            chunk_output_path = (
+                chapter_directory /
+                f"segment-{segment_index:04d}-chunk-{chunk_index:04d}.wav"
             )
-            torch.manual_seed(chunk_seed)
+            regenerate_chunk = (
+                not selected_chunks or segment_index in whole_segment_indexes or segment_index in whole_segment_indexes or
+                (segment_index, chunk_index) in selected_chunks
+            )
+            existing_chunk = existing_chunks.get(chunk_index)
 
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(
-                    chunk_seed
+            if not regenerate_chunk:
+                if (
+                    existing_chunk is None or
+                    existing_chunk.get("sourceText") != chunk_text or
+                    not chunk_output_path.is_file()
+                ):
+                    raise RuntimeError(
+                        f"Chunk {segment_index}:{chunk_index} cannot be reused."
+                    )
+                chunk_audio, chunk_sample_rate = torchaudio.load(
+                    str(chunk_output_path)
                 )
-
-            with torch.inference_mode():
-                generated_audio = model.generate(
+                if chunk_sample_rate != model.sr:
+                    raise RuntimeError(
+                        f"Chunk {segment_index}:{chunk_index} uses an "
+                        f"unexpected sample rate."
+                    )
+                chunk_record = dict(existing_chunk)
+                generated_chunks.append(chunk_audio)
+                chunk_records.append(chunk_record)
+                print(
+                    f"  chunk {chunk_index + 1}/{len(synthesis_units)} | "
+                    f"reused",
+                    flush=True,
+                )
+            else:
+                synthesis_text = normalize_spoken_text(
                     apply_pronunciations(
                         chunk_text,
                         pronunciations,
-                    ),
-                    audio_prompt_path=str(voice_sample),
-                    exaggeration=
-                        synthesis_settings["exaggeration"],
-                    cfg_weight=
-                        synthesis_settings["cfgWeight"],
-                    temperature=
-                        synthesis_settings["temperature"],
+                    )
+                )
+                print(
+                    f"  chunk {chunk_index + 1}/"
+                    f"{len(synthesis_units)} | "
+                    f"{len(chunk_text)} characters",
+                    flush=True,
+                )
+                torch.manual_seed(chunk_seed)
+
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(chunk_seed)
+
+                with torch.inference_mode():
+                    generated_audio = model.generate(
+                        synthesis_text,
+                        language_id="en",
+                        audio_prompt_path=None,
+                        exaggeration=synthesis_settings["exaggeration"],
+                        cfg_weight=synthesis_settings["cfgWeight"],
+                        temperature=synthesis_settings["temperature"],
+                    )
+
+                chunk_audio = generated_audio.detach().to(
+                    device="cpu",
+                    dtype=torch.float32,
+                )
+                del generated_audio
+                chunk_audio, audio_processing = polish_audio(
+                    chunk_audio,
+                    model.sr,
                 )
 
-            chunk_audio = generated_audio.detach().to(
-                device="cpu",
-                dtype=torch.float32,
-            )
+                chunk_temporary_path = chunk_output_path.with_name(
+                    f".{chunk_output_path.name}.tmp"
+                )
+                torchaudio.save(
+                    str(chunk_temporary_path),
+                    chunk_audio,
+                    model.sr,
+                    format="wav",
+                )
+                chunk_temporary_path.replace(chunk_output_path)
+                chunk_record = {
+                    "index": chunk_index,
+                    "sourceText": chunk_text,
+                    "synthesisText": synthesis_text,
+                    "pauseAfterSeconds": pause_after_seconds,
+                    "seed": chunk_seed,
+                    "attempt": args.attempt,
+                    "sampleRate": model.sr,
+                    "durationSeconds": chunk_audio.shape[-1] / model.sr,
+                    "audioPath": str(chunk_output_path),
+                    "sha256": file_sha256(chunk_output_path),
+                    "audioProcessing": audio_processing,
+                }
+                generated_chunks.append(chunk_audio)
+                chunk_records.append(chunk_record)
 
-            del generated_audio
-
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-
-            generated_chunks.append(
-                chunk_audio
-            )
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
 
             if chunk_index + 1 < len(
                 synthesis_units
@@ -795,6 +959,8 @@ def main() -> int:
                 "voiceId": voice_id,
                 "synthesis": synthesis_settings,
                 "sourceText": source_text,
+            "spokenText": spoken_text,
+            "fragmentRewrites": segment.get("fragmentRewrites", []),
                 "pronunciationFingerprint":
                     pronunciation_fingerprint(
                         source_text,
@@ -810,6 +976,8 @@ def main() -> int:
                 "durationSeconds":
                     duration_seconds,
                 "audioPath": str(output_path),
+                "sha256": file_sha256(output_path),
+                "chunks": chunk_records,
             }
         )
 
@@ -855,5 +1023,49 @@ def main() -> int:
     return 0
 
 
+def run_persistent_worker() -> int:
+    for line in sys.stdin:
+        try:
+            request = json.loads(line)
+
+            if request.get("command") == "stop":
+                park_cached_model()
+                return 0
+
+            arguments = request.get("arguments")
+            if not isinstance(arguments, list) or not all(
+                isinstance(argument, str)
+                for argument in arguments
+            ):
+                raise ValueError(
+                    "Persistent synthesis requests require string arguments."
+                )
+
+            exit_code = main(arguments)
+            park_cached_model()
+            response = {
+                "ok": True,
+                "exitCode": exit_code,
+            }
+        except Exception as exception:
+            traceback.print_exc()
+            park_cached_model()
+            response = {
+                "ok": False,
+                "error": str(exception),
+            }
+
+        print(
+            WORKER_RESULT_PREFIX + json.dumps(response),
+            flush=True,
+        )
+
+    park_cached_model()
+    return 0
+
+
 if __name__ == "__main__":
+    if "--persistent-worker" in sys.argv[1:]:
+        raise SystemExit(run_persistent_worker())
+
     raise SystemExit(main())

@@ -16,7 +16,7 @@ public sealed class AutomaticCastingServiceTests
     /// </summary>
     [Theory]
     [InlineData("{", "invalid JSON")]
-    [InlineData("{\"assignments\":[]}", "missing required roles")]
+    [InlineData("{\"assignments\":[]}", "exactly the requested roles")]
     public async Task AssignAsync_RejectedAttempts_ReportsLastFailure(
         string response,
         string expectedFailure)
@@ -32,11 +32,13 @@ public sealed class AutomaticCastingServiceTests
         Assert.NotNull(exception.InnerException);
         Assert.Contains(exception.InnerException.Message, exception.Message, StringComparison.Ordinal);
         Assert.Contains(expectedFailure, generator.UserPrompts[1], StringComparison.OrdinalIgnoreCase);
-        Assert.All(generator.Schemas, schema => Assert.Equal(
-            600,
+        Assert.All(generator.Schemas, schema => Assert.All(
             schema.GetProperty("properties").GetProperty("assignments")
-                .GetProperty("items").GetProperty("properties")
-                .GetProperty("rationale").GetProperty("maxLength").GetInt32()));
+                .GetProperty("items").GetProperty("anyOf").EnumerateArray(),
+            roleSchema => Assert.Equal(
+                500,
+                roleSchema.GetProperty("properties").GetProperty("rationale")
+                    .GetProperty("maxLength").GetInt32())));
     }
 
     /// <summary>

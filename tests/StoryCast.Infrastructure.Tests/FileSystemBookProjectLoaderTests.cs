@@ -8,6 +8,55 @@ namespace StoryCast.Infrastructure.Tests.Books;
 public sealed class FileSystemBookProjectLoaderTests
 {
     /// <summary>
+    /// Verifies a shared manifest in production keeps the story root as the book root.
+    /// </summary>
+    /// <returns>A task representing the asynchronous test operation.</returns>
+    [Fact]
+    public async Task LoadAsync_UsesSharedProductionManifestFromBookRoot()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(), $"storycast-book-{Guid.NewGuid():N}");
+
+        try
+        {
+            var production = Path.Combine(root, "production");
+            var chapters = Path.Combine(production, "chapters");
+            Directory.CreateDirectory(chapters);
+            await File.WriteAllTextAsync(
+                Path.Combine(chapters, "chapter-001.md"), "First chapter.");
+            await File.WriteAllTextAsync(
+                Path.Combine(production, "book.json"),
+                """
+                {
+                  "schemaVersion": 1,
+                  "id": "shared-book",
+                  "title": "Shared Book",
+                  "author": "Test Author",
+                  "language": "en",
+                  "chapters": ["production/chapters/chapter-001.md"]
+                }
+                """);
+
+            var project = await new FileSystemBookProjectLoader()
+                .LoadAsync(root);
+
+            Assert.Equal(root, project.RootPath);
+            Assert.Equal("shared-book", project.Id);
+            Assert.Equal("chapter-001", project.Manuscript.Chapters[0].Id);
+            Assert.Equal(
+                Path.Combine(chapters, "chapter-001.md"),
+                project.Manuscript.Chapters[0].SourcePath);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
     /// Verifies that chapter order follows the manifest rather than filenames.
     /// </summary>
     [Fact]

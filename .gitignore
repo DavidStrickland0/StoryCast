@@ -37,3 +37,8 @@ DevContext.*
 
 # Local source voice recordings
 samples/
+
+# Local code snapshots and duplicate scratch test
+/build/
+*.before-*
+/tools/test_produce_chapter.py

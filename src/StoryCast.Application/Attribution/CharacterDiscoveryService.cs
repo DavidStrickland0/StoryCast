@@ -159,31 +159,35 @@ public sealed partial class CharacterDiscoveryService
 
         foreach (var candidate in response.Characters)
         {
-            if (string.IsNullOrWhiteSpace(candidate.Id) ||
-                !CharacterIdRegex().IsMatch(candidate.Id))
+            var candidateId = CreateCandidateCharacterId(
+                candidate,
+                knownById);
+
+            if (string.IsNullOrWhiteSpace(candidateId) ||
+                !CharacterIdRegex().IsMatch(candidateId))
             {
                 throw new InvalidDataException(
                     $"Character discovery returned invalid ID " +
-                    $"'{candidate.Id}'.");
+                    $"'{candidateId}'.");
             }
 
             if (string.Equals(
-                    candidate.Id,
+                    candidateId,
                     "narrator",
                     StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(
-                    candidate.Id,
+                    candidateId,
                     ProductionScriptSegmenter.UnassignedSpeakerId,
                     StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException(
-                    $"Character ID '{candidate.Id}' is reserved.");
+                    $"Character ID '{candidateId}' is reserved.");
             }
 
             if (string.IsNullOrWhiteSpace(candidate.DisplayName))
             {
                 throw new InvalidDataException(
-                    $"Character '{candidate.Id}' has no display name.");
+                    $"Character '{candidateId}' has no display name.");
             }
 
             if (!Enum.TryParse<CharacterImportance>(
@@ -192,13 +196,13 @@ public sealed partial class CharacterDiscoveryService
                     out var importance))
             {
                 throw new InvalidDataException(
-                    $"Character '{candidate.Id}' has invalid importance " +
+                    $"Character '{candidateId}' has invalid importance " +
                     $"'{candidate.Importance}'.");
             }
 
             var hasExistingCharacter =
                 knownById.TryGetValue(
-                    candidate.Id,
+                    candidateId,
                     out var existing);
 
             var isNamed =
@@ -210,7 +214,7 @@ public sealed partial class CharacterDiscoveryService
                 hasExistingCharacter && isNamed
                     ? existing!.Id
                     : ScopeCharacterId(
-                        candidate.Id,
+                        candidateId,
                         isNamed,
                         chapterId);
 
@@ -240,6 +244,45 @@ public sealed partial class CharacterDiscoveryService
         }
 
         return profiles;
+    }
+
+    private static string CreateCandidateCharacterId(
+        CharacterCandidate candidate,
+        IReadOnlyDictionary<string, CharacterProfile> knownById)
+    {
+        if (!string.IsNullOrWhiteSpace(candidate.Id) &&
+            knownById.TryGetValue(
+                candidate.Id.Trim(),
+                out var existing))
+        {
+            return existing.Id;
+        }
+
+        var source =
+            candidate.IsNamed
+                ? candidate.DisplayName
+                : !string.IsNullOrWhiteSpace(candidate.Id) &&
+                  CharacterIdRegex().IsMatch(candidate.Id)
+                    ? candidate.Id
+                    : candidate.DisplayName;
+
+        return SlugifyCharacterId(source);
+    }
+
+    private static string SlugifyCharacterId(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = Regex.Replace(
+            value.Trim().ToLowerInvariant(),
+            @"[^a-z0-9]+",
+            "-",
+            RegexOptions.CultureInvariant);
+
+        return normalized.Trim('-');
     }
 
     private static string ScopeCharacterId(
