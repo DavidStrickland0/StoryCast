@@ -10,7 +10,7 @@ from pronunciations import (
     find_book_root,
     load_pronunciations,
 )
-from spoken_text import normalize_spoken_text
+from spoken_text import currency_amounts, normalize_spoken_text
 
 def load_json(path: Path) -> dict:
     with path.open(
@@ -47,6 +47,8 @@ def classify_verification(
     expected_words: list[str],
     actual_words: list[str],
     word_error_rate: float,
+    expected_text: str | None = None,
+    actual_text: str | None = None,
 ) -> tuple[str, str]:
     """Classify transcript accuracy for every segment length."""
     if is_repeated_utterance(
@@ -54,6 +56,13 @@ def classify_verification(
         actual_words,
     ):
         return "fail", "repeated-utterance"
+    if expected_text is not None and actual_text is not None:
+        if (
+            currency_amounts(expected_text) != currency_amounts(actual_text) or
+            "$" in normalize_spoken_text(expected_text) or
+            "$" in normalize_spoken_text(actual_text)
+        ):
+            return "fail", "currency-amount-mismatch"
     if word_error_rate <= 0.08:
         return "pass", "transcript"
 
@@ -112,6 +121,8 @@ def verify_audio(
         expected_words,
         actual_words,
         word_error_rate,
+        expected_text,
+        transcription,
     )
     if (
         audio_quality["maximumSilenceSeconds"] > 1.5 or
@@ -131,6 +142,8 @@ def verify_audio(
         "transcription": transcription,
         "audioPath": str(audio_path),
         "audioQuality": audio_quality,
+        "expectedCurrencyAmountsCents": currency_amounts(expected_text),
+        "transcribedCurrencyAmountsCents": currency_amounts(transcription),
     }
 
 

@@ -108,6 +108,16 @@ def year_to_words(value: int) -> str:
 
 def normalize_spoken_text(text: str) -> str:
     """Expand numeric forms that commonly destabilize speech synthesis."""
+    def replace_dollars(match: re.Match[str]) -> str:
+        amount = match.group("amount").replace(",", "")
+        whole, _, fraction = amount.partition(".")
+        dollars = int(whole)
+        cents = int(fraction.ljust(2, "0")) if fraction else 0
+        spoken = integer_to_words(dollars) + (" dollar" if dollars == 1 else " dollars")
+        if cents:
+            spoken += " and " + integer_to_words(cents) + (" cent" if cents == 1 else " cents")
+        return spoken
+
     def replace_date(match: re.Match[str]) -> str:
         month = match.group("month")
         day = ordinal_to_words(int(match.group("day")))
@@ -132,10 +142,24 @@ def normalize_spoken_text(text: str) -> str:
 
         return spoken
 
+    # Expand the complete monetary amount before generic integers or years.
+    result = re.sub(
+        r"\$(?P<amount>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)(?!\d|,\d|\.\d)",
+        replace_dollars,
+        text,
+    )
+    result = re.sub(
+        r"\b(?P<label>room\s+(?:number\s+)?#?)(?P<number>\d+)(?!\w|\.\d)",
+        lambda match: match.group("label") + " ".join(
+            ONES[int(digit)] for digit in match.group("number")
+        ),
+        result,
+        flags=re.IGNORECASE,
+    )
     result = re.sub(
         r"(?<!\w)HP(?!\w)",
         "H P",
-        text,
+        result,
         flags=re.IGNORECASE,
     )
     result = re.sub(
@@ -164,10 +188,39 @@ def normalize_spoken_text(text: str) -> str:
         flags=re.IGNORECASE,
     )
     result = re.sub(
-        r"(?<![\w.])\d{1,3}(?:,\d{3})*(?![\w.])",
+        r"(?<![\w.])\d{1,3}(?:,\d{3})*(?!\w|\.\d)",
         lambda match: integer_to_words(
             int(match.group(0).replace(",", ""))
         ),
         result,
     )
     return result
+
+
+def currency_amounts(text: str) -> list[int]:
+    """Extract dollar amounts in cents for exact verification, independent of WER."""
+    vocabulary = (*ONES, *TEENS, *TENS[2:], "hundred", "thousand", "million", "and")
+    word = "(?:" + "|".join(vocabulary) + ")"
+    number = rf"{word}(?:[\s-]+{word})*"
+    pattern = rf"\b(?P<dollars>{number})\s+dollars?\b(?:\s+and\s+(?P<cents>{number})\s+cents?\b)?"
+    small = {value: index for index, value in enumerate(ONES)}
+    small.update({value: 10 + index for index, value in enumerate(TEENS)})
+    small.update({value: 10 * index for index, value in enumerate(TENS) if value})
+
+    def value(words: str) -> int:
+        total = subtotal = 0
+        for token in re.split(r"[\s-]+", words.lower()):
+            if token in small:
+                subtotal += small[token]
+            elif token == "hundred":
+                subtotal *= 100
+            elif token in ("thousand", "million"):
+                total += subtotal * (1000 if token == "thousand" else 1_000_000)
+                subtotal = 0
+        return total + subtotal
+
+    normalized = normalize_spoken_text(text).lower()
+    return [
+        value(match.group("dollars")) * 100 + value(match.group("cents") or "zero")
+        for match in re.finditer(pattern, normalized)
+    ]

@@ -52,6 +52,7 @@ COPY tools /app/tools
 
 ENV PATH=/opt/storycast/bin:${PATH}
 ENV PYTHONPATH=/app/tools
+ENV PKUSEG_HOME=/models/pkuseg
 
 VOLUME ["/books", "/voices", "/models"]
 

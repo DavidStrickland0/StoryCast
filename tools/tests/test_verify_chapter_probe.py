@@ -6,6 +6,28 @@ from verify_chapter_probe import classify_verification
 
 
 class VerificationClassificationTests(unittest.TestCase):
+    def test_currency_mismatch_fails_even_when_overall_wer_passes(self) -> None:
+        self.assertEqual(
+            ("fail", "currency-amount-mismatch"),
+            classify_verification(
+                ["otherwise"] * 48, ["otherwise"] * 48, 0.0625,
+                "The balance is $2,487.63.", "The balance is $2.48, $7.63.",
+            ),
+        )
+        self.assertEqual(
+            ("fail", "currency-amount-mismatch"),
+            classify_verification([], [], 0.0, "He owes $2,487.63.", "He owes money."),
+        )
+
+    def test_currency_amount_accepts_equivalent_spoken_form(self) -> None:
+        self.assertEqual(
+            ("pass", "transcript"),
+            classify_verification(
+                [], [], 0.0, "He owes $2,487.63.",
+                "He owes two thousand four hundred eighty-seven dollars and sixty-three cents.",
+            ),
+        )
+
     def test_rejects_inaccurate_one_word_utterance(self) -> None:
         status, mode = classify_verification(
             ["sak"],
