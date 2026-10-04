@@ -1,8 +1,44 @@
 ﻿from __future__ import annotations
 
 import unittest
+import json
+import sys
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+import verify_chapter_probe
 
 from verify_chapter_probe import classify_verification
+
+
+class RewrittenVerificationTests(unittest.TestCase):
+    def test_rewrite_retains_transcript_result_and_audit_flag(self):
+        for status in ('pass', 'review', 'fail'):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = root / 'chapter.json'
+                manifest.write_text(json.dumps({'chapterId': 'chapter-003', 'segments': [{
+                    'index': 22, 'speakerId': 'elias', 'voiceId': 'voice',
+                    'sourceText': 'Run!', 'spokenText': 'Run now!',
+                    'audioPath': str(root / 'segment.wav'),
+                }]}))
+                result = {'status': status, 'verificationMode': 'transcript',
+                    'expectedWordCount': 2, 'transcribedWordCount': 2,
+                    'editDistance': 0, 'wordErrorRate': 0, 'transcription': 'Run now.'}
+                fake_modules = {'faster_whisper': SimpleNamespace(WhisperModel=Mock()),
+                    'verify_voice_library': SimpleNamespace(edit_distance=Mock(), normalize_words=Mock())}
+                with patch.dict(sys.modules, fake_modules), \
+                     patch.object(sys, 'argv', ['verify_chapter_probe.py', str(manifest)]), \
+                     patch.object(verify_chapter_probe, 'find_book_root', return_value=root), \
+                     patch.object(verify_chapter_probe, 'load_pronunciations', return_value={}), \
+                     patch.object(verify_chapter_probe, 'verify_audio', return_value=result):
+                    code = verify_chapter_probe.main()
+                report = json.loads((root / 'verification.json').read_text())
+                self.assertEqual(status, report['segments'][0]['status'])
+                self.assertEqual(status, report['chunks'][0]['status'])
+                self.assertTrue(report['segments'][0]['wasRewritten'])
+                self.assertEqual(0 if status == 'pass' else 2, code)
 
 
 class VerificationClassificationTests(unittest.TestCase):

@@ -293,14 +293,9 @@ def main() -> int:
             else "pass"
         )
 
-        if was_rewritten and status == "pass":
-            status = "review"
-            for result in current_results:
-                result["status"] = "review"
-                result["verificationMode"] = "ai-rewritten-short-utterance"
         expected_count = sum(c["expectedWordCount"] for c in current_results)
         distance = sum(c["editDistance"] for c in current_results)
-        verification_mode = "ai-rewritten-short-utterance" if was_rewritten and status == "review" else "transcript"
+        verification_mode = "transcript"
         transcription = " ".join(c["transcription"] for c in current_results)
         word_error_rate = distance / expected_count if expected_count else 1.0
         results.append(

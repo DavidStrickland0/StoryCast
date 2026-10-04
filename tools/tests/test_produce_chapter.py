@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import tempfile
 import unittest
@@ -108,6 +109,29 @@ class SegmentRetryTests(unittest.TestCase):
             "segments": segments,
         }
         path.write_text(json.dumps(report), encoding="utf-8")
+
+    def test_completed_retry_state_with_review_is_reverified(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            self.write_verification(verification, audio, {7: "review"}, 1)
+            state_path = manifest.parent / 'segment-retry-state.json'
+            state_path.write_text(json.dumps({
+                'settings': {'maxAttemptsPerWording': 3, 'maxFragmentRewrites': 3, 'totalAttempts': 12},
+                'completed': True, 'attempt': 1, 'pendingAction': 'complete',
+                'rewriteCounts': {}, 'bestCandidates': {},
+            }))
+            def verify(name, arguments, allowed_exit_codes=(0,)):
+                self.write_verification(verification, audio, {7: 'pass'}, 1)
+                return 0
+            with patch.object(produce_chapter, 'run_stage', side_effect=verify) as runner:
+                produce_chapter.verify_segments_with_retries(
+                    TOOLS_DIRECTORY, root, root / 'voices', 'chapter-001', root,
+                    manifest, 'small.en', 3, [],
+                )
+            self.assertEqual(1, runner.call_count)
+            self.assertEqual('pass', json.loads(verification.read_text())['segments'][0]['status'])
+            self.assertTrue(json.loads(state_path.read_text())['completed'])
 
     def test_retries_only_rejected_segments(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -639,6 +663,61 @@ class SegmentRetryTests(unittest.TestCase):
             self.assertEqual("Hey, asshole!", by_index[7]["spokenText"])
             self.assertEqual(original_by_index[3], by_index[3])
             self.assertEqual(1, len(by_index[7]["fragmentRewrites"]))
+
+
+class FragmentRewriteRecoveryTests(unittest.TestCase):
+    def make_manifest(self, root):
+        path = root / "chapter.json"
+        path.write_text(json.dumps({"segments": [
+            {"index": 22, "speakerId": "elias", "sourceText": '"Run!"',
+             "spokenText": "Run!", "fragmentRewrites": [{"spokenText": "Run quickly!"}]},
+            {"index": 23, "speakerId": "narrator", "sourceText": "He pushed Kaelen toward the entrance."},
+        ]}), encoding="utf-8")
+        return path
+
+    def response(self, text):
+        return io.BytesIO(json.dumps({"response": json.dumps({"spokenText": text})}).encode())
+
+    def test_corrects_unchanged_and_repeated_words_without_mutating_other_segments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.make_manifest(Path(temporary))
+            original = json.loads(path.read_text())
+            with patch.object(produce_chapter.urllib.request, "urlopen", side_effect=[
+                self.response('" RUN, "'), self.response("Run quickly."), self.response("Run now!"),
+            ]) as request:
+                result = produce_chapter.rewrite_short_fragment(path, 22, 2, "model", "http://ollama")
+            self.assertEqual("Run now!", result)
+            self.assertEqual(3, request.call_count)
+            prompt = json.loads(request.call_args_list[1].args[0].data)["prompt"]
+            self.assertIn("Correction:", prompt)
+            updated = json.loads(path.read_text())
+            self.assertEqual(original["segments"][1], updated["segments"][1])
+            self.assertEqual(original["segments"][0]["sourceText"], updated["segments"][0]["sourceText"])
+            self.assertEqual(2, len(updated["segments"][0]["fragmentRewrites"]))
+
+    def test_exhaustion_is_bounded_and_preserves_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.make_manifest(Path(temporary))
+            original = path.read_bytes()
+            with patch.object(produce_chapter.urllib.request, "urlopen", side_effect=[
+                self.response("Run!"), self.response("Run!"), self.response("Run!"),
+            ]) as request:
+                with self.assertRaisesRegex(RuntimeError, "after 3 corrective attempts"):
+                    produce_chapter.rewrite_short_fragment(path, 22, 2, "model", "http://ollama")
+            self.assertEqual(3, request.call_count)
+            self.assertEqual(original, path.read_bytes())
+
+    def test_malformed_response_recovers_and_transport_failure_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.make_manifest(Path(temporary))
+            with patch.object(produce_chapter.urllib.request, "urlopen", side_effect=[
+                io.BytesIO(b"not JSON"), self.response("Run now!"),
+            ]):
+                self.assertEqual("Run now!", produce_chapter.rewrite_short_fragment(path, 22, 2, "model", "http://ollama"))
+            with patch.object(produce_chapter.urllib.request, "urlopen", side_effect=produce_chapter.urllib.error.URLError("offline")) as request:
+                with self.assertRaisesRegex(RuntimeError, "Ollama fragment rewrite failed"):
+                    produce_chapter.rewrite_short_fragment(path, 22, 3, "model", "http://ollama")
+            self.assertEqual(1, request.call_count)
 
 
 class ChunkRetryTests(unittest.TestCase):

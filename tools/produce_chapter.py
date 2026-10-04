@@ -429,97 +429,59 @@ def rewrite_short_fragment(
         "additionalProperties": False,
     }
 
-    request_body = json.dumps(
-        {
-            "model": model,
-            "system": system_prompt,
-            "prompt": prompt,
-            "format": schema,
-            "stream": False,
-            "think": False,
-            "options": {
-                "temperature": 0.4,
-                "num_ctx": 8192,
-                "num_predict": 128,
-            },
-        }
-    ).encode("utf-8")
-
-    endpoint = (
-        ollama_url.rstrip("/") +
-        "/api/generate"
-    )
-
-    request = urllib.request.Request(
-        endpoint,
-        data=request_body,
-        headers={
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=300,
-        ) as response:
-            response_body = response.read().decode(
-                "utf-8"
-            )
-    except urllib.error.URLError as error:
-        raise RuntimeError(
-            f"Ollama fragment rewrite failed: {error}"
-        ) from error
-
-    envelope = json.loads(response_body)
-    raw_result = str(
-        envelope.get("response", "")
-    ).strip()
-
-    if not raw_result:
-        raise RuntimeError(
-            "Ollama returned an empty fragment rewrite."
+    endpoint = ollama_url.rstrip("/") + "/api/generate"
+    rejected = []
+    spoken_text = ""
+    for response_attempt in range(1, 4):
+        attempt_prompt = prompt
+        if rejected:
+            attempt_prompt += "\nPrevious responses were invalid:\n" + "\n".join(rejected)
+        attempt_prompt += (
+            "\nReturn different spoken words from the original, current wording, "
+            "and earlier rewrites. Changing only punctuation or spacing is not a rewrite."
         )
-
-    result = json.loads(raw_result)
-    spoken_text = str(
-        result.get("spokenText", "")
-    ).strip()
-
-    if not spoken_text:
-        raise RuntimeError(
-            "Ollama returned an empty spokenText."
+        request = urllib.request.Request(
+            endpoint,
+            data=json.dumps({
+                "model": model, "system": system_prompt, "prompt": attempt_prompt,
+                "format": schema, "stream": False, "think": False,
+                "options": {"temperature": 0.4, "num_ctx": 8192, "num_predict": 128},
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST",
         )
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                response_body = response.read().decode("utf-8")
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"Ollama fragment rewrite failed: {error}") from error
 
-    spoken_words = re.findall(
-        r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?",
-        spoken_text,
-    )
-
-    source_words = re.findall(
-        r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?",
-        source_text,
-    )
-
-    if not spoken_words:
+        try:
+            envelope = json.loads(response_body)
+            result = json.loads(envelope["response"])
+            spoken_text = result["spokenText"]
+            if not isinstance(spoken_text, str) or not spoken_text.strip():
+                raise ValueError("Return a nonempty spokenText string.")
+            spoken_text = spoken_text.strip()
+            def words(text):
+                return re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", text.casefold())
+            spoken_words = words(spoken_text)
+            if not spoken_words:
+                raise ValueError("The rewritten fragment contains no words.")
+            if len(spoken_words) > len(words(source_text)) + 4:
+                raise ValueError("The rewritten fragment added more than four words.")
+            forbidden = [source_text, previous_spoken_text] + [
+                str(item.get("spokenText", "")) for item in previous_rewrites
+            ]
+            if any(spoken_words == words(value) for value in forbidden):
+                raise ValueError("The suggestion repeats unchanged or previously attempted spoken words.")
+            break
+        except (ValueError, KeyError, TypeError) as error:
+            rejected.append(f"Response {response_attempt}: {response_body[:1000]}\nCorrection: {error}")
+            print(f"Fragment rewrite {response_attempt}/3 rejected: {error}")
+    else:
         raise RuntimeError(
-            "The rewritten fragment contains no words."
-        )
-
-    if len(spoken_words) > len(source_words) + 4:
-        raise RuntimeError(
-            "The rewritten fragment added more than four words."
-        )
-
-    previous_values = {
-        str(item.get("spokenText", "")).casefold()
-        for item in previous_rewrites
-    }
-
-    if spoken_text.casefold() in previous_values:
-        raise RuntimeError(
-            "Ollama repeated an earlier fragment rewrite."
+            f"Ollama fragment rewrite failed after 3 corrective attempts for segment {segment_index}. "
+            "Saved chapter audio and retry progress are preserved. " + rejected[-1]
         )
 
     rewrite_record = {
@@ -724,7 +686,17 @@ def verify_segments_with_retries(
         write_json_atomic(retry_state_path, state)
 
     if state.get("completed"):
-        return
+        saved_verification = load_json(verification_path)
+        unresolved = [int(segment["segmentIndex"])
+                      for segment in saved_verification.get("segments", [])
+                      if segment["status"] != "pass"]
+        if not unresolved:
+            return
+        state["completed"] = False
+        state["pendingAction"] = "verify"
+        state["unresolvedSegmentIndexes"] = unresolved
+        state["unresolvedChunks"] = []
+        write_json_atomic(retry_state_path, state)
 
     # The chapter manifest is authoritative if the process stopped after an
     # atomic rewrite but before its retry-state checkpoint was written.
@@ -957,7 +929,6 @@ def verify_segments_with_retries(
             chunk
             for chunk in verification.get("chunks", [])
             if chunk["status"] != "pass"
-            and not any(seg.get("wasRewritten") and seg["status"] == "review" and seg["segmentIndex"] == chunk["segmentIndex"] for seg in verification["segments"])
         ]
         rejected_segments = (
             []
@@ -1014,10 +985,6 @@ def verify_segments_with_retries(
             return
 
         if not rejected_segments and not rejected_chunks:
-            if any(seg.get("wasRewritten") and seg["status"] == "review"
-                   for seg in verification["segments"]):
-                save_state(attempt, "complete", completed=True)
-                return
             raise RuntimeError(
                 "Verification returned failure without "
                 "identifying rejected segments."
@@ -1026,8 +993,7 @@ def verify_segments_with_retries(
         retry_segments = [
             segment for segment in verification["segments"]
             if segment["status"] == "fail"
-            or ("chunks" in verification and segment["status"] == "review"
-                and not segment.get("wasRewritten"))
+            or ("chunks" in verification and segment["status"] == "review")
         ]
         short_indexes = {int(seg["segmentIndex"]) for seg in retry_segments if 0 < int(seg.get("expectedWordCount", 0)) <= 5}
         non_short_rejections = [
@@ -1480,6 +1446,7 @@ def main() -> int:
                     args.whisper_model,
                 "maxSegmentAttempts":
                     args.max_segment_attempts,
+                "verificationPolicyVersion": 2,
             },
             [verification_path],
             lambda: verify_segments_with_retries(
