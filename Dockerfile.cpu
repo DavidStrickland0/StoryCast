@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
+ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV HF_HOME=/models/huggingface XDG_CACHE_HOME=/models/cache
+ENV STORYCAST_DEVICE=cpu
+RUN apt-get update && apt-get install --yes --no-install-recommends build-essential ffmpeg libsndfile1 && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.worker.txt /app/requirements.worker.txt
+RUN sed -i 's|cu126|cpu|g' /app/requirements.worker.txt
+RUN --mount=type=cache,target=/models/cache/pip python -m pip install --upgrade pip setuptools wheel && python -m pip install --requirement /app/requirements.worker.txt
+RUN --mount=type=cache,target=/models/cache/pip python -m pip install --no-deps --force-reinstall "chatterbox-tts @ https://github.com/resemble-ai/chatterbox/archive/5de7a54aa4e5e2baadb0182dde554908b48b85c2.zip"
+RUN python -m pip install --force-reinstall setuptools==80.9.0 av==18.1.0
+COPY tools /app/tools
+ENV PYTHONPATH=/app/tools PKUSEG_HOME=/models/pkuseg
+VOLUME ["/books", "/voices", "/models"]
+ENTRYPOINT ["python"]

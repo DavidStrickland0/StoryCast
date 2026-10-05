@@ -6,6 +6,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from worker_device import whisper_options
 
 from faster_whisper import WhisperModel
 
@@ -206,14 +207,13 @@ def main() -> int:
         )
 
     print(
-        f"Loading {args.model} on CUDA...",
+        f"Loading {args.model} on {whisper_options()['device']}...",
         flush=True,
     )
 
     model = WhisperModel(
         args.model,
-        device="cuda",
-        compute_type="float16",
+        **whisper_options(),
     )
 
     results: list[dict[str, object]] = []

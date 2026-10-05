@@ -4,6 +4,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from worker_device import whisper_options
 
 from pronunciations import (
     canonicalize_transcription,
@@ -204,14 +205,13 @@ def main() -> int:
     book = find_book_root(manifest_path)
     pronunciations = load_pronunciations(book)
     print(
-        f"Loading {args.model} on CUDA...",
+        f"Loading {args.model} on {whisper_options()['device']}...",
         flush=True,
     )
 
     model = WhisperModel(
         args.model,
-        device="cuda",
-        compute_type="float16",
+        **whisper_options(),
     )
 
     segments_to_verify = [

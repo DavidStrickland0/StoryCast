@@ -167,7 +167,18 @@ internal sealed class DockerWorkerRuntime
         startInfo.ArgumentList.Add("run");
         startInfo.ArgumentList.Add("--rm");
 
-        if (useGpu)
+        var cpuOnly = string.Equals(
+            Environment.GetEnvironmentVariable("STORYCAST_DEVICE"),
+            "cpu",
+            StringComparison.OrdinalIgnoreCase);
+
+        if (cpuOnly)
+        {
+            startInfo.ArgumentList.Add("--env");
+            startInfo.ArgumentList.Add("STORYCAST_DEVICE=cpu");
+        }
+
+        if (useGpu && !cpuOnly)
         {
             startInfo.ArgumentList.Add("--gpus");
             startInfo.ArgumentList.Add("all");
