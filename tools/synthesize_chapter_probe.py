@@ -17,6 +17,7 @@ import torchaudio
 
 from audio_postprocessing import polish_audio
 from book_manifest import resolve_book_manifest
+from heading_pauses import load_markdown_headings, split_synthesis_units, CHUNK_PAUSE_SECONDS, HEADING_PAUSE_SECONDS
 from prosody import resolve_segment_synthesis_settings
 from pronunciations import (
     apply_pronunciations,
@@ -33,8 +34,6 @@ DEFAULT_NARRATOR_EXAGGERATION = 0.4
 DEFAULT_CHARACTER_EXAGGERATION = 0.65
 DEFAULT_CFG_WEIGHT = 0.5
 DEFAULT_TEMPERATURE = 0.7
-CHUNK_PAUSE_SECONDS = 0.12
-HEADING_PAUSE_SECONDS = 1.25
 WORKER_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
 _CACHED_MODEL = None
 
@@ -50,91 +49,6 @@ def prepare_synthesis_text(text: str) -> str:
         return f"{words[0]}."
 
     return text
-
-def load_markdown_headings(
-    book: Path,
-    chapter_id: str,
-) -> set[str]:
-    """Load spoken headings from the chapter Markdown."""
-    manifest = load_json(resolve_book_manifest(book))
-    chapter_path: Path | None = None
-
-    for index, chapter_value in enumerate(manifest["chapters"], 1):
-        candidate = (book / str(chapter_value)).resolve()
-
-        if candidate.stem.lower() == chapter_id.lower() or chapter_id.lower() == f"chapter-{index:03d}":
-            chapter_path = candidate
-            break
-
-    if chapter_path is None or not chapter_path.is_file():
-        return set()
-
-    headings: set[str] = set()
-
-    with chapter_path.open(
-        "r",
-        encoding="utf-8-sig",
-    ) as stream:
-        first_line = True
-        for line in stream:
-            stripped = line.strip().lstrip('\ufeff')
-            if first_line and stripped:
-                first_line = False
-                if re.match(r'^Chapter\s+(?:\d+|[IVXLCDM]+)\b', stripped, re.IGNORECASE):
-                    headings.add(stripped)
-            match = re.match(
-                r"^[ \t]{0,3}#{1,6}[ \t]+"
-                r"(.+?)[ \t]*#*[ \t]*$",
-                line.rstrip("\r\n"),
-            )
-
-            if match:
-                headings.add(match.group(1).strip())
-
-    return headings
-
-
-def split_synthesis_units(
-    text: str,
-    headings: set[str],
-    max_characters: int = MAX_SYNTHESIS_CHARACTERS,
-) -> list[tuple[str, float]]:
-    """Split text and assign longer pauses after headings."""
-    units: list[tuple[str, float]] = []
-    ordinary_lines: list[str] = []
-    spoken_headings = {normalize_spoken_text(heading).strip() for heading in headings}
-
-    def flush_ordinary() -> None:
-        ordinary_text = "\n".join(ordinary_lines).strip()
-        ordinary_lines.clear()
-
-        if not ordinary_text:
-            return
-
-        for chunk in split_synthesis_text(ordinary_text, max_characters=max_characters):
-            pause = (
-                CHUNK_PAUSE_SECONDS
-                if ends_at_sentence_boundary(chunk)
-                else 0.0
-            )
-            units.append((chunk, pause))
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        chat_chunks = split_chat_message(stripped, max_characters)
-
-        if chat_chunks is not None:
-            flush_ordinary()
-            units.extend((chunk, CHUNK_PAUSE_SECONDS) for chunk in chat_chunks)
-        elif stripped and (stripped in headings or stripped in spoken_headings):
-            flush_ordinary()
-            units.append((stripped, HEADING_PAUSE_SECONDS))
-        else:
-            ordinary_lines.append(line)
-
-    flush_ordinary()
-    return units
-
 
 def resolve_synthesis_settings(
     assignment: dict,

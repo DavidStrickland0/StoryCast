@@ -12,6 +12,22 @@ from spoken_text import currency_amounts, normalize_spoken_text
 
 
 class SpokenTextTests(unittest.TestCase):
+    def test_spells_os_without_changing_words_or_pronouns(self) -> None:
+        self.assertEqual("The O S works. I use it.", normalize_spoken_text("The OS works. I use it."))
+        self.assertEqual("OSes Cosmos os", normalize_spoken_text("OSes Cosmos os"))
+
+    def test_reads_world_war_roman_numerals_as_numbers(self) -> None:
+        self.assertEqual(
+            "World War one ended before World War two.",
+            normalize_spoken_text("World War I ended before World War II."),
+        )
+        self.assertEqual("world war two", normalize_spoken_text("world war II"))
+        text = "I saw an IV drip. II is a label. World War III."
+        self.assertEqual(text, normalize_spoken_text(text))
+        text = "The OS recorded World War II. I read it."
+        normalized = normalize_spoken_text(text)
+        self.assertEqual(normalized, normalize_spoken_text(normalized))
+
     def test_expands_complete_currency_before_generic_numbers(self) -> None:
         self.assertEqual(
             "He owed two thousand four hundred eighty-seven dollars and sixty-three cents.",

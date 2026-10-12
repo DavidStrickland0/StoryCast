@@ -154,6 +154,16 @@ def normalize_spoken_text(text: str) -> str:
 
         return spoken
 
+    # OS is an initialism. Match uppercase only so ordinary prose is untouched.
+    text = re.sub(r"(?<!\w)OS(?!\w)", "O S", text)
+    # A bare I is usually the pronoun, and IV can mean intravenous. Expand
+    # Roman numerals only in the explicit World War context.
+    text = re.sub(
+        r"\b(?P<label>(?i:world\s+war)\s+)(?P<numeral>II|I)(?!\w)",
+        lambda match: match["label"] + ("two" if match["numeral"] == "II" else "one"),
+        text,
+    )
+
     # Expand the complete monetary amount before generic integers or years.
     result = re.sub(
         r"\$(?P<amount>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)(?!\d|,\d|\.\d)",
