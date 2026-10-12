@@ -9,6 +9,29 @@ namespace StoryCast.Application.Tests.Attribution;
 /// </summary>
 public sealed class ProductionScriptSegmenterTests
 {
+    /// <summary>Missing quotation marks cannot invert later paragraphs.</summary>
+    [Fact]
+    public void Segment_UnclosedParagraphDoesNotConsumeLaterDialogue()
+    {
+        const string text = "\"His death will not arouse suspicion.\n\nAdam asked, \"How should I find him?\"\n\n\"I have located him.\"";
+        var script = new ProductionScriptSegmenter().Segment(CreateChapter(text));
+        Assert.Equal(text, string.Concat(script.Segments.Select(segment => segment.SourceText)));
+        var dialogue = script.Segments.Where(segment => segment.Kind == SegmentKind.Dialogue).ToArray();
+        Assert.Equal(2, dialogue.Length);
+        Assert.Contains(dialogue, segment => segment.SourceText.Contains("How should I find him?"));
+        Assert.Contains(dialogue, segment => segment.SourceText.Contains("I have located him."));
+        Assert.All(dialogue, segment => Assert.Contains(segment.SourceText, char.IsLetterOrDigit));
+    }
+
+    /// <summary>Quote-only separators preserve source without becoming dialogue.</summary>
+    [Fact]
+    public void Segment_QuotedBlankLinesDoNotCreateSpeech()
+    {
+        const string text = "He waited.\n\n\"\n\n\"\n\n\"Ready?\"";
+        var script = new ProductionScriptSegmenter().Segment(CreateChapter(text));
+        Assert.Equal(text, string.Concat(script.Segments.Select(segment => segment.SourceText)));
+        Assert.Equal("\"Ready?\"", Assert.Single(script.Segments, segment => segment.Kind == SegmentKind.Dialogue).SourceText);
+    }
     /// <summary>
     /// Verifies segmentation around straight quotation marks.
     /// </summary>

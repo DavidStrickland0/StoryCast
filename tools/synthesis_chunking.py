@@ -9,6 +9,21 @@ import argparse
 MAX_SYNTHESIS_CHARACTERS = 280
 
 
+def split_chat_message(text: str, max_characters: int) -> list[str] | None:
+    """Keep a structured chat label with the first words of its message."""
+    match = re.match(r"^(\[[^\]\n:]+\([^\]\n:]+\)\s*:\s*)(.+)$", text)
+    if not match:
+        match = re.match(r"^([A-Za-z0-9 _-]+ from [A-Za-z0-9 _-]+:\s*)(.+)$", text)
+    if not match:
+        return None
+    label, message = match.groups()
+    # Retry limits as small as 60 must not strand or split a username. Keep
+    # enough message context for synthesis and ASR, even on those retries.
+    budget = max(80, max_characters - len(label))
+    chunks = split_synthesis_text(message, max_characters=budget)
+    return [label + chunks[0], *chunks[1:]]
+
+
 def split_synthesis_text(
     text: str,
     max_characters: int = MAX_SYNTHESIS_CHARACTERS,

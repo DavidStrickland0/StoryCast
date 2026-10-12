@@ -12,6 +12,117 @@ namespace StoryCast.Application.Tests.Attribution;
 /// </summary>
 public sealed class DialogueAttributionServiceTests
 {
+    /// <summary>Exhausted invalid responses produce provisional, explicitly uncertain audio assignments only when enabled.</summary>
+    [Fact]
+    public async Task AttributeAsync_ReviewModeFallsBackAfterBoundedInvalidResponses()
+    {
+        var generator = new StubStructuredTextGenerator("{}");
+        var result = await new DialogueAttributionService(generator, allowReview: true).AttributeAsync(CreateScript(), CreateRegistry());
+        Assert.Equal(3, generator.CallCount);
+        Assert.Equal(2, result.Count);
+        Assert.All(result, assignment =>
+        {
+            Assert.Equal(0m, assignment.Confidence);
+            Assert.Contains("review", assignment.Rationale);
+        });
+    }
+
+    /// <summary>Accepts abbreviated evidence that occurs in the turn's own paragraph.</summary>
+    [Theory]
+    [InlineData("...")]
+    [InlineData("\u2026")]
+    public async Task AttributeAsync_AllowsAbbreviatedCitationInOwnParagraph(string ellipsis)
+    {
+        const string text = "Miller said, \"Oh great, another delay.\"";
+        var script = new ProductionScriptSegmenter().Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-001", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = text
+        });
+        var generator = new BatchGenerator((_, indexes, _) => JsonSerializer.Serialize(new
+        {
+            assignments = indexes.Select(index => new { segmentIndex = index, speakerId = "marcia-miller",
+                confidence = 0.95m, delivery = "dry", rationale = $"Direct dialogue tag 'Oh great{ellipsis}' in this paragraph." })
+        }));
+        var result = await new DialogueAttributionService(generator).AttributeAsync(script, CreateRegistry());
+        Assert.Single(generator.Requests);
+        Assert.Equal("marcia-miller", Assert.Single(result).SpeakerId);
+    }
+
+    /// <summary>Allows an earlier tag to anchor a contextual reply without claiming direct proof.</summary>
+    [Fact]
+    public async Task AttributeAsync_AllowsContextualReferenceToEarlierTag()
+    {
+        const string text = "Marcia Miller said, \"Move.\"\n\n\"Why?\"";
+        var script = new ProductionScriptSegmenter().Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-001", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = text
+        });
+        var generator = new BatchGenerator((_, indexes, _) => JsonSerializer.Serialize(new
+        {
+            assignments = indexes.Select(index => new
+            {
+                segmentIndex = index,
+                speakerId = index == indexes[0] ? "marcia-miller" : "elias-thorne",
+                confidence = 0.85m, delivery = "calm",
+                rationale = "Conversational reply anchored by earlier dialogue tag 'Marcia Miller said'."
+            })
+        }));
+        var result = await new DialogueAttributionService(generator).AttributeAsync(script, CreateRegistry());
+        Assert.Single(generator.Requests);
+        Assert.Equal("elias-thorne", result[1].SpeakerId);
+    }
+
+    /// <summary>Rejects a reply attributed using a tag from the preceding paragraph.</summary>
+    [Fact]
+    public async Task AttributeAsync_RejectsBorrowedDialogueTagAndRetries()
+    {
+        const string text = "Marcia Miller said, \"Move.\"\n\n\"Why?\"";
+        var script = new ProductionScriptSegmenter().Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-001", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = text
+        });
+        var generator = new BatchGenerator((attempt, indexes, _) => JsonSerializer.Serialize(new
+        {
+            assignments = indexes.Select(index => new
+            {
+                segmentIndex = index,
+                speakerId = attempt == 1 || index == indexes[0] ? "marcia-miller" : "elias-thorne",
+                confidence = 0.95m, delivery = "calm",
+                rationale = attempt == 1 ? "Directly identified by dialogue tag 'Marcia Miller said'." : "Established conversational reply."
+            })
+        }));
+        var result = await new DialogueAttributionService(generator).AttributeAsync(script, CreateRegistry());
+        Assert.Equal(2, generator.Requests.Count);
+        Assert.Contains("outside its source paragraph", generator.Requests[1].Prompt, StringComparison.Ordinal);
+        Assert.Equal("elias-thorne", result[1].SpeakerId);
+    }
+
+    /// <summary>Preserves tag scope when an untagged reply starts a new paragraph.</summary>
+    [Fact]
+    public async Task AttributeAsync_ProvidesParagraphScopedTurnEvidence()
+    {
+        const string text = "\"Would you turn away?\" Marcia Miller asked.\n\n\"Why?\"\n\n\"Because I am changing.\"";
+        var script = new ProductionScriptSegmenter().Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-001", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = text
+        });
+        var generator = new BatchGenerator((_, indexes, _) => CompleteResponse(indexes));
+        await new DialogueAttributionService(generator).AttributeAsync(script, CreateRegistry());
+        var prompt = Assert.Single(generator.Requests).Prompt;
+        var paragraphs = prompt.Split("here belong to their own paragraph, not the next turn):")[1]
+            .Split("Earlier batch assignments")[0].Trim();
+        using var document = JsonDocument.Parse(paragraphs);
+        var turns = document.RootElement.EnumerateArray().ToArray();
+        Assert.Equal(3, turns.Length);
+        Assert.Equal("\"Would you turn away?\" Marcia Miller asked.", turns[0].GetProperty("Paragraph").GetString());
+        Assert.Equal("\"Why?\"", turns[1].GetProperty("Paragraph").GetString());
+        Assert.Equal("\"Because I am changing.\"", turns[2].GetProperty("Paragraph").GetString());
+    }
+
     /// <summary>
     /// Verifies generated assignments and dynamic schema restrictions.
     /// </summary>
@@ -142,6 +253,44 @@ public sealed class DialogueAttributionServiceTests
         });
     }
 
+    /// <summary>Untagged exchanges retain assigned turns across batch boundaries.</summary>
+    [Fact]
+    public async Task AttributeAsync_UntaggedExchange_CarriesSpeakerContinuity()
+    {
+        var text = "Miller faced Thorne.\n\n" + string.Join("\n\n",
+            Enumerable.Range(0, 10).Select(index => $"\"Turn {index}.\""));
+        var script = new ProductionScriptSegmenter().Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-001",
+            SourcePath = @"C:\Book\exchange.md",
+            SourceSha256 = new string('a', 64),
+            PreparationVersion = "1",
+            SpokenText = text
+        });
+        var generator = new BatchGenerator((_, indexes, _) => JsonSerializer.Serialize(new
+        {
+            assignments = indexes.Select(index => new
+            {
+                segmentIndex = index,
+                speakerId = index % 2 == 1 ? "marcia-miller" : "elias-thorne",
+                confidence = 0.85m,
+                delivery = "calm",
+                rationale = "Established two-person exchange."
+            })
+        }));
+
+        var result = await new DialogueAttributionService(generator).AttributeAsync(script, CreateRegistry());
+
+        Assert.Equal(10, result.Count);
+        Assert.Equal(2, generator.Requests.Count);
+        const string marker = "Earlier batch assignments (speaker continuity context):";
+        var context = generator.Requests[1].Prompt.Split(marker)[1].Split("Return exactly")[0].Trim();
+        using var document = JsonDocument.Parse(context);
+        Assert.Equal(8, document.RootElement.GetArrayLength());
+        Assert.Equal("elias-thorne", document.RootElement[7].GetProperty("SpeakerId").GetString());
+        Assert.Equal(result[7].SegmentIndex, document.RootElement[7].GetProperty("SegmentIndex").GetInt32());
+    }
+
     /// <summary>Verifies only an invalid batch is retried, with complete coverage.</summary>
     [Theory]
     [InlineData("truncated")]
@@ -235,6 +384,8 @@ public sealed class DialogueAttributionServiceTests
         public Task<string> GenerateAsync(string systemPrompt, string userPrompt, JsonElement jsonSchema, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            Assert.Contains("Do not alternate mechanically", systemPrompt, StringComparison.Ordinal);
+            Assert.Contains("successive quoted paragraphs normally alternate speakers", systemPrompt, StringComparison.Ordinal);
             var array = jsonSchema.GetProperty("properties").GetProperty("assignments");
             var indexes = array.GetProperty("items").GetProperty("properties").GetProperty("segmentIndex")
                 .GetProperty("enum").EnumerateArray().Select(index => index.GetInt32()).ToArray();

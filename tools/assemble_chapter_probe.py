@@ -34,12 +34,22 @@ def main() -> int:
         default=PAUSE_SECONDS,
     )
 
+    parser.add_argument("--allow-review", action="store_true")
     args = parser.parse_args()
 
     manifest_path = args.chapter_manifest.resolve()
     chapter_directory = manifest_path.parent
 
     manifest = load_json(manifest_path)
+    # Resume older producers that persisted the review contract at verification
+    # but omitted the assembler flag. New producers also pass it explicitly.
+    run_path = chapter_directory.parent / "run.json"
+    allow_review = args.allow_review
+    if not allow_review and run_path.is_file():
+        run = load_json(run_path)
+        checkpoint = run.get("stageCheckpoints", {}).get("segmentVerification", {})
+        allow_review = (run.get("chapterId") == manifest["chapterId"] and
+                        checkpoint.get("settings", {}).get("allowReview") is True)
 
     verification_path = (
         chapter_directory / "verification.json"
@@ -92,7 +102,8 @@ def main() -> int:
                 f"verification result."
             )
 
-        if verification_result["status"] != "pass":
+        allowed_statuses = ("pass", "review", "fail") if allow_review else ("pass",)
+        if verification_result["status"] not in allowed_statuses:
             raise RuntimeError(
                 f"Segment {segment_index} has verification "
                 f"status '{verification_result['status']}'."
@@ -210,6 +221,7 @@ def main() -> int:
         "durationSeconds": duration_seconds,
         "audioPath": str(output_path),
         "segments": timing,
+        "reviewRequired": any(item["status"] != "pass" for item in verification["segments"]),
     }
 
     assembly_path = (

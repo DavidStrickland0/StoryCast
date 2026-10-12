@@ -10,6 +10,7 @@ from pathlib import Path
 from book_manifest import resolve_book_manifest
 
 DEFAULT_BITRATE = "128k"
+CHAPTER_END_PADDING_SECONDS = 1.0
 
 
 def load_json(path: Path) -> dict:
@@ -328,6 +329,8 @@ def main() -> int:
         [
             "-c:a",
             "libmp3lame",
+            "-af",
+            f"apad=pad_dur={CHAPTER_END_PADDING_SECONDS}",
             "-b:a",
             args.bitrate,
             "-id3v2_version",
@@ -375,6 +378,7 @@ def main() -> int:
         "language": metadata["language"],
         "publicationYear": publication_year,
         "bitrate": args.bitrate,
+        "endPaddingSeconds": CHAPTER_END_PADDING_SECONDS,
         "coverPath": (
             str(cover_path)
             if cover_path is not None

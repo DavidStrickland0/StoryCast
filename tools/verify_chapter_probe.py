@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from worker_device import whisper_options
@@ -12,6 +14,7 @@ from pronunciations import (
     load_pronunciations,
 )
 from spoken_text import currency_amounts, normalize_spoken_text
+from secondary_transcription import SecondaryTranscriber
 
 def load_json(path: Path) -> dict:
     with path.open(
@@ -19,6 +22,16 @@ def load_json(path: Path) -> dict:
         encoding="utf-8-sig",
     ) as stream:
         return json.load(stream)
+
+
+def reusable_chunk_result(previous, audio_path, expected_text, policy):
+    if not previous or previous.get("status") != "pass" or previous.get("expectedText") != expected_text:
+        return None
+    if previous.get("verificationPolicy") != policy or not previous.get("audioSha256"):
+        return None
+    if not audio_path.is_file() or hashlib.sha256(audio_path.read_bytes()).hexdigest() != previous["audioSha256"]:
+        return None
+    return dict(previous)
 
 
 def is_repeated_utterance(
@@ -78,6 +91,8 @@ def verify_audio(
     audio_path: Path,
     expected_text: str,
     pronunciations: list,
+    character_names: list[str] | None = None,
+    secondary_verifier=None,
 ) -> dict:
     import torchaudio
     from audio_postprocessing import analyze_audio
@@ -125,6 +140,56 @@ def verify_audio(
         expected_text,
         transcription,
     )
+    name_hint_details = {}
+    names = sorted({part for name in character_names or [] for part in re.findall(r"[A-Za-z]+", name)
+                    if len(part) >= 3 and re.search(r"(?<!\w)" + re.escape(part) + r"(?!\w)", expected_text, re.IGNORECASE)})
+    if status != "pass" and names:
+        hinted_segments, _ = model.transcribe(
+            str(audio_path), language="en", beam_size=5, vad_filter=True,
+            condition_on_previous_text=False, temperature=0.0,
+            word_timestamps=False,
+            initial_prompt="Character names: " + ", ".join(dict.fromkeys([*(character_names or []), *names]))[:600] + ".",
+        )
+        hinted_text = " ".join(item.text.strip() for item in hinted_segments).strip()
+        hinted_words = normalize_words(normalize_spoken_text(canonicalize_transcription(hinted_text, pronunciations)))
+        name_words = {word for name in names for word in normalize_words(name)}
+        hinted_distance = edit_distance(expected_words, hinted_words)
+        # A name hint may correct spelling, but cannot add missing speech,
+        # change dialogue, or remove repetitions/numbers from the transcript.
+        accepted_hint = (len(hinted_words) == len(actual_words)
+                         and all(before == after or after in name_words
+                                 for before, after in zip(actual_words, hinted_words))
+                         and hinted_distance < distance)
+        name_hint_details = {"unhintedTranscription": transcription, "nameHintTranscription": hinted_text,
+                             "nameHints": names[:32], "nameHintAccepted": accepted_hint}
+        if accepted_hint:
+            transcription, actual_words, distance = hinted_text, hinted_words, hinted_distance
+            word_error_rate = distance / len(expected_words) if expected_words else 1.0
+            status, verification_mode = classify_verification(expected_words, actual_words, word_error_rate,
+                                                               expected_text, transcription)
+            if status == "pass":
+                verification_mode = "transcript-character-name-hint"
+    secondary_details = {}
+    if status != "pass" and secondary_verifier is not None:
+        try:
+            secondary_text = secondary_verifier.transcribe(audio_path)
+            secondary_words = normalize_words(normalize_spoken_text(canonicalize_transcription(secondary_text, pronunciations)))
+            secondary_distance = edit_distance(expected_words, secondary_words)
+            secondary_wer = secondary_distance / len(expected_words) if expected_words else 1.0
+            secondary_status, _ = classify_verification(expected_words, secondary_words, secondary_wer,
+                                                       expected_text, secondary_text)
+            accepted = secondary_status == "pass" and secondary_distance < distance
+            secondary_details = {"primaryTranscription": transcription,
+                                 "secondaryModel": secondary_verifier.model_name,
+                                 "secondaryTranscription": secondary_text,
+                                 "secondaryWordErrorRate": round(secondary_wer, 6),
+                                 "secondaryAccepted": accepted}
+            if accepted:
+                transcription, actual_words, distance = secondary_text, secondary_words, secondary_distance
+                word_error_rate, status, verification_mode = secondary_wer, "pass", "transcript-independent-asr"
+        except Exception as error:
+            secondary_details = {"secondaryModel": secondary_verifier.model_name,
+                                 "secondaryAccepted": False, "secondaryError": str(error)}
     if (
         audio_quality["maximumSilenceSeconds"] > 1.5 or
         audio_quality["leadingSilenceSeconds"] > 0.6 or
@@ -133,6 +198,8 @@ def verify_audio(
         status = "fail"
         verification_mode = "audio-quality-silence"
     return {
+        **name_hint_details,
+        **secondary_details,
         "expectedWordCount": len(expected_words),
         "transcribedWordCount": len(actual_words),
         "editDistance": distance,
@@ -163,6 +230,7 @@ def main() -> int:
         "--model",
         default="small.en",
     )
+    parser.add_argument("--secondary-model", default="medium.en", help="Independent CPU verifier for rejected clips; 'none' disables it")
     parser.add_argument(
         "--segment-index",
         type=int,
@@ -187,6 +255,7 @@ def main() -> int:
     )
 
     existing_results: list[dict] = []
+    existing_report = {}
 
     if (
         selected_indexes is not None
@@ -204,6 +273,17 @@ def main() -> int:
         ]
     book = find_book_root(manifest_path)
     pronunciations = load_pronunciations(book)
+    character_path = book / "production" / "characters.json"
+    character_names = set()
+    if character_path.is_file():
+        for character in load_json(character_path).get("characters", []):
+            if not character.get("isNamed", True):
+                continue
+            for name in [character.get("displayName", ""), *character.get("aliases", [])]:
+                if isinstance(name, str):
+                    if re.fullmatch(r"[A-Za-z][A-Za-z '\-]{1,80}", name):
+                        character_names.add(name)
+    character_names = sorted(character_names)
     print(
         f"Loading {args.model} on {whisper_options()['device']}...",
         flush=True,
@@ -213,6 +293,14 @@ def main() -> int:
         args.model,
         **whisper_options(),
     )
+    secondary_verifier = None if args.secondary_model == "none" else SecondaryTranscriber(args.secondary_model)
+    policy_inputs = {"model": args.model, "secondaryModel": args.secondary_model,
+                     "pronunciations": pronunciations, "characterNames": sorted(character_names)}
+    policy_digest = hashlib.sha256(json.dumps(policy_inputs, sort_keys=True).encode())
+    for filename in ("verify_chapter_probe.py", "verify_voice_library.py", "secondary_transcription.py", "pronunciations.py", "spoken_text.py"):
+        policy_digest.update((Path(__file__).parent / filename).read_bytes())
+    policy = policy_digest.hexdigest()
+    prior_chunks = {(item["segmentIndex"], item["chunkIndex"]): item for item in existing_report.get("chunks", [])}
 
     segments_to_verify = [
         segment
@@ -262,12 +350,16 @@ def main() -> int:
         ]
         current_results: list[dict] = []
         for chunk in chunks:
-            result = verify_audio(
-                model,
-                Path(chunk["audioPath"]).resolve(),
-                chunk["sourceText"],
-                pronunciations,
-            )
+            chunk_audio = Path(chunk["audioPath"]).resolve()
+            result = reusable_chunk_result(prior_chunks.get((segment["index"], chunk["index"])),
+                                           chunk_audio, chunk["sourceText"], policy)
+            reused = result is not None
+            if result is None:
+                result = verify_audio(model, chunk_audio, chunk["sourceText"], pronunciations,
+                                      character_names, secondary_verifier)
+                result["verificationPolicy"] = policy
+                result["audioSha256"] = hashlib.sha256(chunk_audio.read_bytes()).hexdigest() if chunk_audio.is_file() else None
+            result["verificationReused"] = reused
             result.update(
                 {
                     "segmentIndex": segment["index"],

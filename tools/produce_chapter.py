@@ -14,8 +14,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from book_manifest import resolve_book_manifest
+from prepare_audio_text import prepare_chapter
+from spoken_text import has_spoken_content
+from pronunciations import load_pronunciations, pronunciation_fingerprint
+from chat_label_recovery import recover_chat_labels
 
 SYNTHESIS_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
+
+
+class FragmentRewriteUnavailable(RuntimeError):
+    """The model could not supply a usable replacement; audio can still proceed."""
 
 
 class PersistentSynthesisWorker:
@@ -146,6 +154,7 @@ def parse_args() -> argparse.Namespace:
         "--rewrite-model",
         default="qwen3.8:27b",
     )
+    parser.add_argument("--audio-preparation-model", default="qwen3.5:4b")
     parser.add_argument(
         "--ollama-url",
         default=(
@@ -157,6 +166,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
     )
+    parser.add_argument("--allow-review", action="store_true")
     return parser.parse_args()
 
 
@@ -357,6 +367,8 @@ def rewrite_short_fragment(
     position = matching_positions[0]
     target = segments[position]
     source_text = str(target["sourceText"])
+    if not has_spoken_content(source_text):
+        raise ValueError(f"Segment {segment_index} contains no spoken text; refusing to invent dialogue. Regenerate the production script.")
     previous_spoken_text = str(
         target.get("spokenText", source_text)
     )
@@ -390,7 +402,7 @@ def rewrite_short_fragment(
     )
 
     system_prompt = (
-        "You minimally rewrite a very short dialogue fragment "
+        "You minimally rewrite a narration or dialogue segment "
         "that repeatedly failed text-to-speech synthesis. "
         "Preserve the speaker's immediate intent, emotional tone, "
         "tense, viewpoint, and scene continuity. This is an adult "
@@ -445,7 +457,7 @@ def rewrite_short_fragment(
             data=json.dumps({
                 "model": model, "system": system_prompt, "prompt": attempt_prompt,
                 "format": schema, "stream": False, "think": False,
-                "options": {"temperature": 0.4, "num_ctx": 8192, "num_predict": 128},
+                "options": {"temperature": 0.4, "num_ctx": 8192, "num_predict": max(128, len(source_text) + 64)},
             }).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST",
         )
@@ -453,8 +465,9 @@ def rewrite_short_fragment(
             with urllib.request.urlopen(request, timeout=300) as response:
                 response_body = response.read().decode("utf-8")
         except urllib.error.URLError as error:
-            raise RuntimeError(f"Ollama fragment rewrite failed: {error}") from error
+            raise FragmentRewriteUnavailable(f"Ollama fragment rewrite failed: {error}") from error
 
+        result = None
         try:
             envelope = json.loads(response_body)
             result = json.loads(envelope["response"])
@@ -476,10 +489,10 @@ def rewrite_short_fragment(
                 raise ValueError("The suggestion repeats unchanged or previously attempted spoken words.")
             break
         except (ValueError, KeyError, TypeError) as error:
-            rejected.append(f"Response {response_attempt}: {response_body[:1000]}\nCorrection: {error}")
+            rejected.append(f"Response {response_attempt}: {result if result is not None else response_body[:1000]}\nCorrection: {error}")
             print(f"Fragment rewrite {response_attempt}/3 rejected: {error}")
     else:
-        raise RuntimeError(
+        raise FragmentRewriteUnavailable(
             f"Ollama fragment rewrite failed after 3 corrective attempts for segment {segment_index}. "
             "Saved chapter audio and retry progress are preserved. " + rejected[-1]
         )
@@ -491,7 +504,7 @@ def rewrite_short_fragment(
         "spokenText": spoken_text,
         "model": model,
         "reason":
-            "short-utterance-generation-failure",
+            "repeated-segment-verification-failure",
     }
 
     target["spokenText"] = spoken_text
@@ -544,6 +557,40 @@ def rewrite_short_fragment(
     return spoken_text
 
 
+def align_restored_candidate_manifest(chapter_manifest: Path, state: dict) -> None:
+    """Keep a restored clip's expected wording and hashes aligned with audio."""
+    manifest = load_json(chapter_manifest)
+    changed = False
+    for segment in manifest.get("segments", []):
+        best = state.get("bestCandidates", {}).get(str(segment["index"]))
+        if not best:
+            continue
+        candidate_path = Path(best["audioPath"])
+        destination = Path(segment["audioPath"])
+        if not candidate_path.is_file() or not destination.is_file() or sha256_file(candidate_path) != sha256_file(destination):
+            continue
+        verification = best["verification"]
+        spoken = verification.get("expectedText")
+        if not isinstance(spoken, str):
+            continue
+        segment["spokenText"] = spoken
+        segment["restoredCandidateAttempt"] = best["attempt"]
+        for chunk, verified in zip(segment.get("chunks", []), verification.get("chunks", [])):
+            chunk["sourceText"] = verified["expectedText"]
+            chunk["synthesisText"] = verified["expectedText"]
+            if Path(chunk["audioPath"]).is_file():
+                chunk["sha256"] = sha256_file(Path(chunk["audioPath"]))
+        changed = True
+    if changed:
+        write_json_atomic(chapter_manifest, manifest)
+
+
+def assemble_verified_audio(tools_directory: Path, chapter_manifest: Path, pause: float, allow_review: bool = False) -> int:
+    return run_stage("Assembly", [sys.executable, str(tools_directory / "assemble_chapter_probe.py"),
+                                 str(chapter_manifest), "--pause", str(pause),
+                                 *(["--allow-review"] if allow_review else [])])
+
+
 def verify_segments_with_retries(
     tools_directory: Path,
     book: Path,
@@ -560,6 +607,7 @@ def verify_segments_with_retries(
     ),
     max_fragment_rewrites: int = 3,
     synthesis_runner=None,
+    allow_review: bool = False,
 ) -> None:
     verification_path = chapter_manifest.parent / "verification.json"
     retry_state_path = chapter_manifest.parent / "segment-retry-state.json"
@@ -685,7 +733,62 @@ def verify_segments_with_retries(
 
         write_json_atomic(retry_state_path, state)
 
+    # Changed applicable pronunciations give previously exhausted audio a new
+    # bounded verification cycle. Preserve earlier diagnostics before reuse.
+    manifest_for_pronunciations = load_json(chapter_manifest)
+    pronunciation_text = "\n".join(str(s.get("sourceText", "")) for s in manifest_for_pronunciations.get("segments", []))
+    pronunciation_entries = load_pronunciations(book)
+    current_pronunciation_hash = pronunciation_fingerprint(pronunciation_text, pronunciation_entries)
+    empty_pronunciation_hash = pronunciation_fingerprint(pronunciation_text, [])
+    previous_pronunciation_hash = state.get("pronunciationFingerprint", empty_pronunciation_hash)
+    if current_pronunciation_hash != previous_pronunciation_hash:
+        archive = chapter_manifest.parent / "verification-history" / uuid.uuid4().hex
+        archive.mkdir(parents=True)
+        for previous in [retry_state_path, verification_path, *chapter_manifest.parent.glob("verification-attempt-*.json")]:
+            if previous.is_file():
+                shutil.copy2(previous, archive / previous.name)
+        state.update(attempt=1, pendingAction="verify", unresolvedSegmentIndexes=None,
+                     unresolvedChunks=[], bestCandidates={}, completed=False)
+        print("Applicable pronunciations changed; restarting bounded verification. Previous reports: " + str(archive), flush=True)
+    state["pronunciationFingerprint"] = current_pronunciation_hash
+
+    # Grant an exhausted legacy chunk run one bounded cycle under the new
+    # selective policy. Persist the version so ordinary restarts cannot grant
+    # unlimited retries. Preserve every previous report and passed audio chunk.
+    if state.get("selectiveChunkRetryVersion", 0) < 1 and not state.get("completed") and int(state.get("attempt", 1)) >= total_attempts and verification_path.is_file():
+        previous_report = load_json(verification_path)
+        rejected = [chunk for chunk in previous_report.get("chunks", []) if chunk.get("status") != "pass"]
+        if rejected:
+            archive = chapter_manifest.parent / "verification-history" / uuid.uuid4().hex
+            archive.mkdir(parents=True)
+            for previous in [retry_state_path, verification_path, *chapter_manifest.parent.glob("verification-attempt-*.json")]:
+                if previous.is_file():
+                    shutil.copy2(previous, archive / previous.name)
+            state.update(attempt=1, pendingAction="verify", completed=False,
+                         unresolvedSegmentIndexes=sorted({int(chunk["segmentIndex"]) for chunk in rejected}),
+                         unresolvedChunks=[], bestCandidates={})
+            state["recognitionRecoveryVersion"] = 1
+            print("Selective chunk retry policy upgraded; restarting one bounded verification cycle. Previous reports: " + str(archive), flush=True)
+    state["selectiveChunkRetryVersion"] = 1
+    if state.get("recognitionRecoveryVersion", 0) < 1 and not state.get("completed") and int(state.get("attempt", 1)) >= total_attempts and verification_path.is_file():
+        previous_report = load_json(verification_path)
+        rejected = [chunk for chunk in previous_report.get("chunks", []) if chunk.get("status") != "pass"]
+        if rejected:
+            archive = chapter_manifest.parent / "verification-history" / uuid.uuid4().hex
+            archive.mkdir(parents=True)
+            for previous in [retry_state_path, verification_path, *chapter_manifest.parent.glob("verification-attempt-*.json")]:
+                if previous.is_file():
+                    shutil.copy2(previous, archive / previous.name)
+            state["recognitionRecoveryPriorAttempts"] = state.get("attempt", 1)
+            state.update(attempt=1, pendingAction="verify", completed=False,
+                         unresolvedSegmentIndexes=sorted({int(chunk["segmentIndex"]) for chunk in rejected}),
+                         unresolvedChunks=[], bestCandidates={})
+            print("Independent recognition recovery added; rechecking saved audio once under the new policy. Previous reports: " + str(archive), flush=True)
+    state["recognitionRecoveryVersion"] = 1
+    write_json_atomic(retry_state_path, state)
+
     if state.get("completed"):
+        align_restored_candidate_manifest(chapter_manifest, state)
         saved_verification = load_json(verification_path)
         unresolved = [int(segment["segmentIndex"])
                       for segment in saved_verification.get("segments", [])
@@ -702,7 +805,10 @@ def verify_segments_with_retries(
     # atomic rewrite but before its retry-state checkpoint was written.
     manifest = load_json(chapter_manifest)
     manifest_rewrite_counts = {
-        int(segment["index"]): len(segment.get("fragmentRewrites", []))
+        int(segment["index"]): max(
+            len(segment.get("fragmentRewrites", [])),
+            max((int(item["rewriteNumber"]) for item in segment.get("fragmentRewriteFailures", [])), default=0),
+        )
         for segment in manifest.get("segments", [])
     }
     rewrite_counts = {
@@ -757,9 +863,30 @@ def verify_segments_with_retries(
     attempt = int(state.get("attempt", 1))
     pending_action = str(state.get("pendingAction", "verify"))
 
-    while attempt <= total_attempts:
+    # A checkpoint interrupted after its final synthesis must verify that new
+    # audio before returning; falling out of this loop is never success.
+    while attempt <= total_attempts or (pending_action == "verify" and attempt == total_attempts + 1):
         if pending_action == "rewrite":
             desired_rewrite_number = attempt // max_attempts
+
+            # Older checkpoints scheduled whole-segment rewrites for chunk
+            # failures. Resume those as selective retries under this policy.
+            if verification_path.is_file():
+                saved_report = load_json(verification_path)
+                if "chunks" in saved_report:
+                    large_indexes = {
+                        int(segment["segmentIndex"])
+                        for segment in saved_report.get("segments", [])
+                        if int(segment.get("expectedWordCount", 0)) > 5
+                        and int(segment["segmentIndex"]) in (unresolved_indexes or [])
+                    }
+                    unresolved_indexes = [index for index in unresolved_indexes or [] if index not in large_indexes]
+                    unresolved_chunks = sorted({
+                        *(tuple(chunk) for chunk in unresolved_chunks),
+                        *((int(chunk["segmentIndex"]), int(chunk["chunkIndex"]))
+                          for chunk in saved_report["chunks"]
+                          if int(chunk["segmentIndex"]) in large_indexes and chunk["status"] != "pass"),
+                    })
 
             for segment_index in unresolved_indexes or []:
                 existing_count = rewrite_counts.get(segment_index, 0)
@@ -767,13 +894,22 @@ def verify_segments_with_retries(
                 if existing_count >= desired_rewrite_number:
                     continue
 
-                rewrite_short_fragment(
-                    chapter_manifest,
-                    segment_index,
-                    desired_rewrite_number,
-                    rewrite_model,
-                    ollama_url,
-                )
+                try:
+                    rewrite_short_fragment(
+                        chapter_manifest, segment_index, desired_rewrite_number,
+                        rewrite_model, ollama_url,
+                    )
+                except FragmentRewriteUnavailable as error:
+                    manifest = load_json(chapter_manifest)
+                    target = next(s for s in manifest["segments"] if int(s["index"]) == segment_index)
+                    target["synthesisMaxCharacters"] = max(60, 160 // desired_rewrite_number)
+                    target.setdefault("fragmentRewriteFailures", []).append({
+                        "rewriteNumber": desired_rewrite_number, "model": rewrite_model,
+                        "reason": str(error), "fallback": "smaller-synthesis-chunks",
+                        "maxCharacters": target["synthesisMaxCharacters"],
+                    })
+                    write_json_atomic(chapter_manifest, manifest)
+                    print(f"Segment {segment_index}: rewrite unavailable; preserving wording and synthesizing in chunks of at most {target['synthesisMaxCharacters']} characters.", flush=True)
                 rewrite_counts[segment_index] = desired_rewrite_number
                 save_state(attempt, "rewrite")
 
@@ -974,6 +1110,13 @@ def verify_segments_with_retries(
             }
         )
 
+        if allow_review and any(item["status"] == "review" for item in verification.get("chunks", verification["segments"])) and not any(
+            item["status"] == "fail" for item in verification.get("chunks", verification["segments"])
+        ):
+            save_state(attempt, "complete", completed=True)
+            print("Review audio retained for final export; verification findings remain in the report.", flush=True)
+            return
+
         if exit_code == 0:
             if rejected_segments or rejected_chunks:
                 raise RuntimeError(
@@ -989,6 +1132,18 @@ def verify_segments_with_retries(
                 "Verification returned failure without "
                 "identifying rejected segments."
             )
+
+        if attempt < total_attempts and (attempt >= max_attempts or state.get("recognitionRecoveryPriorAttempts", 0) >= max_attempts):
+            recovery_manifest = load_json(chapter_manifest)
+            recovered = recover_chat_labels(recovery_manifest, verification, pronunciation_entries)
+            if recovered:
+                write_json_atomic(chapter_manifest, recovery_manifest)
+                unresolved_indexes = []
+                unresolved_chunks = [(int(chunk["segmentIndex"]), int(chunk["chunkIndex"])) for chunk in rejected_chunks]
+                pending_action = "synthesize"
+                save_state(attempt, pending_action)
+                print(f"Recovering ambiguous chat labels by literal handle spelling: {recovered}. Message text and passing chunks are preserved.", flush=True)
+                continue
 
         retry_segments = [
             segment for segment in verification["segments"]
@@ -1012,9 +1167,13 @@ def verify_segments_with_retries(
         ]
 
         if (
-            attempt >= max_attempts
+            attempt >= total_attempts
             and non_short_rejections
         ):
+            if allow_review:
+                save_state(attempt, "complete", completed=True)
+                print("Recognition retry budget exhausted; final audio will be exported for review with failed findings preserved.", flush=True)
+                return
             indexes = [
                 segment["segmentIndex"]
                 for segment in non_short_rejections
@@ -1022,7 +1181,13 @@ def verify_segments_with_retries(
 
             raise RuntimeError(
                 f"Segments {indexes} did not pass after "
-                f"{max_attempts} attempts."
+                f"{total_attempts} verification attempts. "
+                "Rejected chunks: " + "; ".join(
+                    f"{chunk['segmentIndex']}:{chunk['chunkIndex']} "
+                    f"({chunk['status']}) expected {chunk.get('expectedText', '')!r}; "
+                    f"heard {chunk.get('transcription', '')!r}"
+                    for chunk in rejected_chunks
+                ) + f". Full report: {verification_path}."
             )
 
         if attempt >= total_attempts:
@@ -1071,6 +1236,9 @@ def verify_segments_with_retries(
                 selected["candidateAudioPath"] = str(
                     best["audioPath"]
                 )
+                for selected_chunk in selected.get("chunks", []):
+                    selected_chunk["status"] = "review"
+                    selected_chunk["verificationMode"] = selected["verificationMode"]
 
                 for chunk in verification.get("chunks", []):
                     if int(chunk["segmentIndex"]) == segment_index:
@@ -1123,22 +1291,39 @@ def verify_segments_with_retries(
                 flush=True,
             )
 
-            save_state(attempt, "complete", completed=True)
-            return
+            align_restored_candidate_manifest(chapter_manifest, {
+                "bestCandidates": {str(index): candidate for index, candidate in best_short_candidates.items()}
+            })
+            if allow_review and not any(item["status"] == "fail" for item in verification.get("chunks", verification["segments"])):
+                save_state(attempt, "complete", completed=True)
+                return
+            save_state(attempt, "verify", completed=False)
+            indexes = [segment["segmentIndex"] for segment in retry_segments]
+            raise RuntimeError(f"Segments {indexes} still require review after {total_attempts} attempts. "
+                               "Best candidate audio is preserved; assembly was not started.")
 
+        rewrite_due = attempt % max_attempts == 0
+        # Reword only genuinely short segments. Regenerating a large segment
+        # discards passing chunks, and the rewrite fallback can fragment its
+        # sentences into progressively smaller synthesis/ASR inputs.
         unresolved_indexes = [
             int(segment["segmentIndex"])
             for segment in retry_segments
             if int(segment["segmentIndex"]) in short_indexes or "chunks" not in verification
         ]
+        # A wording change invalidates all chunks in that segment. Regenerate
+        # the whole segment after rewriting; retain selective chunk retries
+        # while retrying unchanged wording.
         unresolved_chunks = [[int(c["segmentIndex"]), int(c["chunkIndex"])] for c in rejected_chunks if int(c["segmentIndex"]) not in short_indexes]
 
         pending_action = (
             "rewrite"
-            if attempt % max_attempts == 0
+            if rewrite_due and (short_indexes or "chunks" not in verification)
             else "synthesize"
         )
         save_state(attempt, pending_action)
+
+    raise RuntimeError("Segment verification budget exhausted without a verified completion.")
 
 def segment_audio_paths(
     chapter_manifest: Path,
@@ -1335,6 +1520,7 @@ def main() -> int:
         report["completedUtc"] = None
         report["status"] = "running"
         report["failedStage"] = None
+        report["error"] = None
         report["segmentVerificationAttempts"] = []
         report["masteredAudioPath"] = None
         report.setdefault(
@@ -1379,6 +1565,8 @@ def main() -> int:
     synthesis_worker = None
 
     try:
+        current_stage = "audio text preparation"
+        prepare_chapter(book, args.chapter, args.audio_preparation_model, args.ollama_url)
         current_stage = "synthesis"
 
         synthesis_worker = PersistentSynthesisWorker(
@@ -1428,6 +1616,12 @@ def main() -> int:
             chapter_manifest,
             tools_directory /
             "verify_chapter_probe.py",
+            tools_directory / "produce_chapter.py",
+            tools_directory / "secondary_transcription.py",
+            tools_directory / "chat_label_recovery.py",
+            tools_directory / "verify_voice_library.py",
+            tools_directory / "pronunciations.py",
+            tools_directory / "spoken_text.py",
             *segment_audio_paths(
                 chapter_manifest
             ),
@@ -1446,7 +1640,8 @@ def main() -> int:
                     args.whisper_model,
                 "maxSegmentAttempts":
                     args.max_segment_attempts,
-                "verificationPolicyVersion": 2,
+                "verificationPolicyVersion": 4,
+                "allowReview": args.allow_review,
             },
             [verification_path],
             lambda: verify_segments_with_retries(
@@ -1465,6 +1660,7 @@ def main() -> int:
                 args.ollama_url,
                 args.max_fragment_rewrites,
                 synthesis_runner=synthesis_worker.run,
+                allow_review=args.allow_review,
             ),
         )
 
@@ -1483,6 +1679,7 @@ def main() -> int:
 
         assembly_inputs = [
             chapter_manifest,
+            verification_path,
             tools_directory /
             "assemble_chapter_probe.py",
             *segment_audio_paths(
@@ -1500,24 +1697,13 @@ def main() -> int:
             assembly_inputs,
             {
                 "pauseSeconds": args.pause,
+                "allowReview": args.allow_review,
             },
             [
                 assembly_manifest,
                 raw_chapter_audio,
             ],
-            lambda: run_stage(
-                "Assembly",
-                [
-                    sys.executable,
-                    str(
-                        tools_directory /
-                        "assemble_chapter_probe.py"
-                    ),
-                    str(chapter_manifest),
-                    "--pause",
-                    str(args.pause),
-                ],
-            ),
+            lambda: assemble_verified_audio(tools_directory, chapter_manifest, args.pause, args.allow_review),
         )
 
         assembly_verification_path = (
@@ -1526,6 +1712,15 @@ def main() -> int:
         )
 
         current_stage = "assembly verification"
+
+        assembly_integrity_inputs = [chapter_manifest, chapter_directory / "verification.json"]
+        assembly_integrity_inputs.extend(
+            Path(segment["audioPath"]) for segment in load_json(chapter_manifest)["segments"]
+        )
+        assembly_integrity_inputs.extend(
+            Path(chunk["audioPath"]) for segment in load_json(chapter_manifest)["segments"]
+            for chunk in segment.get("chunks", [])
+        )
 
         run_checkpointed_stage(
             "Assembly verification",
@@ -1537,10 +1732,12 @@ def main() -> int:
                 raw_chapter_audio,
                 tools_directory /
                 "verify_assembly_probe.py",
+                *assembly_integrity_inputs,
             ],
             {
                 "whisperModel":
                     args.whisper_model,
+                "allowReview": args.allow_review,
             },
             [assembly_verification_path],
             lambda: run_stage(
@@ -1554,6 +1751,7 @@ def main() -> int:
                     str(assembly_manifest),
                     "--model",
                     args.whisper_model,
+                    *(["--allow-review"] if args.allow_review else []),
                 ],
             ),
         )
@@ -1606,6 +1804,11 @@ def main() -> int:
 
         current_stage = "mastered verification"
 
+        mastered_comparison_fingerprint = pronunciation_fingerprint(
+            " ".join(segment["sourceText"] for segment in load_json(chapter_manifest)["segments"]),
+            load_pronunciations(book),
+        )
+
         run_checkpointed_stage(
             "Mastered verification",
             "masteredVerification",
@@ -1616,10 +1819,15 @@ def main() -> int:
                 mastered_audio,
                 tools_directory /
                 "verify_assembly_probe.py",
+                chapter_manifest,
+                tools_directory / "pronunciations.py",
+                tools_directory / "spoken_text.py",
             ],
             {
                 "whisperModel":
                     args.whisper_model,
+                "allowReview": args.allow_review,
+                "pronunciationFingerprint": mastered_comparison_fingerprint,
             },
             [mastered_verification_path],
             lambda: run_stage(
@@ -1638,8 +1846,22 @@ def main() -> int:
                     "--model",
                     args.whisper_model,
                 ],
+                allowed_exit_codes=(0, 2) if args.allow_review else (0,),
             ),
         )
+        mastered_result = load_json(mastered_verification_path)
+        if mastered_result["status"] == "fail" and not args.allow_review:
+            raise RuntimeError("Mastered audio verification failed; final audio is incomplete or incorrect.")
+        report["reviewRequired"] = (mastered_result["status"] != "pass" or any(
+            item["status"] != "pass" for item in load_json(verification_path).get("chunks", load_json(verification_path)["segments"])
+        ))
+        dialogue_review_path = book / "production/dialogue-review" / f"{args.chapter}.json"
+        dialogue_review = load_json(dialogue_review_path) if dialogue_review_path.is_file() else {}
+        if dialogue_review.get("sourceSha256") == load_json(chapter_manifest)["sourceSha256"]:
+            report["dialogueReview"] = dialogue_review
+            report["reviewRequired"] |= dialogue_review.get("reviewRequired", False)
+        report["allowReview"] = args.allow_review
+
         final_audio = (
             book /
             "output" /
@@ -1716,12 +1938,13 @@ def main() -> int:
         print(f"MP3:     {final_audio}")
 
         return 0
-    except Exception:
+    except Exception as error:
         if synthesis_worker is not None:
             synthesis_worker.close()
 
         report["status"] = "failed"
         report["failedStage"] = current_stage
+        report["error"] = str(error)
         report["completedUtc"] = (
             datetime.now(
                 timezone.utc

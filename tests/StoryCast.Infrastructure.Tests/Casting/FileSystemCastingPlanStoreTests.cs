@@ -30,6 +30,12 @@ public sealed class FileSystemCastingPlanStoreTests
             {
                 SchemaVersion = 1,
                 BookId = book.Id,
+                VoiceUseCounts = new Dictionary<string, int> { ["voice-1"] = 2, ["unused"] = 0 },
+                ChapterVoiceUsage = new Dictionary<string, ChapterVoiceUsage>
+                {
+                    ["chapter-001"] = new() { ChapterIndex = 0, SourceSha256 = new string('a', 64), VoiceUseCounts = new Dictionary<string, int> { ["voice-1"] = 2 } }
+                },
+                RetiredAssignments = [new CastingAssignment { CharacterId = "retired", VoiceId = "voice-1", Confidence = 1 }],
                 Assignments =
                 [
                     new CastingAssignment
@@ -50,6 +56,10 @@ public sealed class FileSystemCastingPlanStoreTests
             var loaded = await store.LoadAsync(book);
 
             Assert.NotNull(loaded);
+            Assert.Equal(2, loaded.VoiceUseCounts["voice-1"]);
+            Assert.Equal(0, loaded.VoiceUseCounts["unused"]);
+            Assert.Equal(2, loaded.ChapterVoiceUsage["chapter-001"].VoiceUseCounts["voice-1"]);
+            Assert.Single(loaded.RetiredAssignments);
 
             var assignment =
                 Assert.Single(loaded.Assignments);

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import unittest
+import hashlib
 import json
 import sys
 import tempfile
@@ -10,6 +11,23 @@ from unittest.mock import Mock, patch
 import verify_chapter_probe
 
 from verify_chapter_probe import classify_verification
+
+
+class VerifiedChunkReuseTests(unittest.TestCase):
+    def test_reuse_requires_exact_audio_text_policy_and_passing_result(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            audio = Path(temporary) / "audio.wav"
+            audio.write_bytes(b"verified audio")
+            previous = {"status": "pass", "expectedText": "Hello", "verificationPolicy": "policy",
+                        "audioSha256": hashlib.sha256(audio.read_bytes()).hexdigest()}
+            self.assertEqual(previous, verify_chapter_probe.reusable_chunk_result(previous, audio, "Hello", "policy"))
+            for field, value in (("status", "review"), ("status", "fail"), ("expectedText", "Goodbye"),
+                                 ("verificationPolicy", "changed"), ("audioSha256", None)):
+                self.assertIsNone(verify_chapter_probe.reusable_chunk_result({**previous, field: value}, audio, "Hello", "policy"))
+            audio.write_bytes(b"changed audio")
+            self.assertIsNone(verify_chapter_probe.reusable_chunk_result(previous, audio, "Hello", "policy"))
+            audio.unlink()
+            self.assertIsNone(verify_chapter_probe.reusable_chunk_result(previous, audio, "Hello", "policy"))
 
 
 class RewrittenVerificationTests(unittest.TestCase):

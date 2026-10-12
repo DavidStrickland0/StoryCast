@@ -11,10 +11,11 @@ internal static class DialogueCommands
     /// Attributes dialogue for a complete book or one requested chapter.
     /// </summary>
     /// <param name="args">The dialogue-attribution arguments.</param>
+    /// <param name="reportFailure">Receives the detailed error for incremental production state.</param>
     /// <returns>
     /// A task containing zero on success; otherwise, a nonzero exit code.
     /// </returns>
-    public static async Task<int> AttributeAsync(string[] args)
+    public static async Task<int> AttributeAsync(string[] args, Action<string>? reportFailure = null)
     {
         if (args.Length == 0 ||
             args[0].StartsWith("--", StringComparison.Ordinal))
@@ -59,10 +60,13 @@ internal static class DialogueCommands
                 model,
                 ollamaUrl,
                 force,
-                chapterId);
+                chapterId,
+                reportFailure,
+                args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase));
         }
         catch (ArgumentException exception)
         {
+            reportFailure?.Invoke(exception.Message);
             Console.Error.WriteLine(exception.Message);
             return 1;
         }
@@ -73,7 +77,9 @@ internal static class DialogueCommands
         string model,
         string ollamaUrl,
         bool force,
-        string? chapterId)
+        string? chapterId,
+        Action<string>? reportFailure,
+        bool allowReview)
     {
         try
         {
@@ -103,7 +109,7 @@ internal static class DialogueCommands
                 new DialogueAttributionWorkflow(
                     new ChapterTextPreparer(),
                     new ProductionScriptSegmenter(),
-                    new DialogueAttributionService(generator),
+                    new DialogueAttributionService(generator, allowReview),
                     new DialogueAttributionApplicator(),
                     new FileSystemCharacterRegistryStore(),
                     new FileSystemProductionScriptStore());
@@ -155,6 +161,7 @@ internal static class DialogueCommands
             UnauthorizedAccessException or
             UriFormatException)
         {
+            reportFailure?.Invoke(exception.Message);
             Console.Error.WriteLine(
                 $"Dialogue attribution failed: {exception.Message}");
 

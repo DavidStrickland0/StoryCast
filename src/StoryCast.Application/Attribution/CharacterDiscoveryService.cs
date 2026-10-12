@@ -15,10 +15,21 @@ public sealed partial class CharacterDiscoveryService
     private const string SystemPrompt =
         """
         You identify characters for multi-voice audiobook production.
+        Return each speaker exactly once. Character IDs must be unique.
 
         Identify only people, creatures, artificial intelligences, or other
         entities that speak dialogue or serve as a first-person narrator in
         the supplied chapter.
+
+        Include participants in untagged back-and-forth dialogue, not just
+        characters with explicit "said" tags. Infer distinct participants from
+        nearby actions, questions and replies, forms of address, and the full
+        exchange. Successive quoted paragraphs in an established two-person
+        conversation normally alternate; do not collapse both participants
+        into one character because attribution tags are absent. Do not invent
+        extra participants for a continuing speech or alternate mechanically
+        in a group conversation. When the text establishes a distinct speaker
+        without a name, create an unnamed identity using the rules below.
 
         Reuse an existing character ID whenever the chapter refers to a known
         character by name, title, surname, alias, pronoun, or description.
@@ -111,34 +122,35 @@ public sealed partial class CharacterDiscoveryService
             </chapter>
             """;
 
-        var responseText = await generator.GenerateAsync(
-            SystemPrompt,
-            userPrompt,
-            ResponseSchema,
-            cancellationToken);
-
-        CharacterDiscoveryResponse response;
-
-        try
+        var originalPrompt = userPrompt;
+        for (var attempt = 1; attempt <= 3; attempt++)
         {
-            response =
-                JsonSerializer.Deserialize<CharacterDiscoveryResponse>(
-                    responseText,
-                    SerializerOptions) ??
-                throw new InvalidDataException(
-                    "Character discovery returned an empty document.");
+            try
+            {
+                var responseText = await generator.GenerateAsync(
+                    SystemPrompt, userPrompt, ResponseSchema, cancellationToken);
+                CharacterDiscoveryResponse response;
+                try
+                {
+                    response = JsonSerializer.Deserialize<CharacterDiscoveryResponse>(
+                        responseText, SerializerOptions) ??
+                        throw new InvalidDataException("Character discovery returned an empty document.");
+                }
+                catch (JsonException exception)
+                {
+                    throw new InvalidDataException("Character discovery returned invalid JSON.", exception);
+                }
+                return ValidateAndMap(response, knownCharacters, chapter.ChapterId);
+            }
+            catch (InvalidDataException exception) when (attempt < 3)
+            {
+                Console.WriteLine($"Character discovery correction {attempt}/3: {exception.Message}");
+                userPrompt = originalPrompt + "\nYour previous response was invalid: " + exception.Message +
+                    "\nReturn a complete corrected character list. Use each ID once. " +
+                    "Merge repeated entries for the same speaker; use distinct IDs for distinct speakers.";
+            }
         }
-        catch (JsonException exception)
-        {
-            throw new InvalidDataException(
-                "Character discovery returned invalid JSON.",
-                exception);
-        }
-
-        return ValidateAndMap(
-            response,
-            knownCharacters,
-            chapter.ChapterId);
+        throw new InvalidOperationException("Character discovery attempts exhausted.");
     }
 
     private static IReadOnlyList<CharacterProfile> ValidateAndMap(
@@ -205,6 +217,22 @@ public sealed partial class CharacterDiscoveryService
                     candidateId,
                     out var existing);
 
+            // A known named identity stays named even if the model incorrectly
+            // labels the new occurrence unnamed or proposes a chapter-scoped ID.
+            if (!hasExistingCharacter)
+            {
+                var namedMatches = knownCharacters.Where(character => character.IsNamed &&
+                    character.Aliases.Append(character.DisplayName).Any(name =>
+                        string.Equals(name.Trim(), candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase))).ToArray();
+                if (namedMatches.Length == 1)
+                {
+                    existing = namedMatches[0];
+                    hasExistingCharacter = true;
+                }
+                else if (namedMatches.Length > 1)
+                    throw new InvalidDataException($"Character '{candidate.DisplayName}' ambiguously matches known named identities.");
+            }
+
             var isNamed =
                 candidate.IsNamed ||
                 (hasExistingCharacter &&
@@ -220,6 +248,17 @@ public sealed partial class CharacterDiscoveryService
 
             if (!returnedIds.Add(normalizedId))
             {
+                var previous = profiles.Single(profile => string.Equals(profile.Id, normalizedId, StringComparison.OrdinalIgnoreCase));
+                if (previous.DisplayName == candidate.DisplayName.Trim() &&
+                    previous.Description == candidate.Description.Trim() &&
+                    previous.IsNamed == isNamed && previous.Importance == importance &&
+                    previous.IsNarrator == candidate.IsNarrator &&
+                    previous.VoicePresentation == ResolvePresentation(candidate.VoicePresentation, candidate.VoiceTraits) &&
+                    previous.Aliases.SequenceEqual(NormalizeValues(candidate.Aliases)) &&
+                    previous.VoiceTraits.SequenceEqual(NormalizeVoiceTraits(candidate.VoiceTraits)))
+                {
+                    continue;
+                }
                 throw new InvalidDataException(
                     $"Character discovery returned duplicate ID " +
                     $"'{normalizedId}'.");

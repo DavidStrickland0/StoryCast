@@ -1,4 +1,5 @@
 from __future__ import annotations
+from chat_label_recovery import apply_chunk_speech_overrides
 
 import argparse
 import gc
@@ -22,8 +23,10 @@ from pronunciations import (
     load_pronunciations,
     pronunciation_fingerprint,
 )
-from spoken_text import normalize_spoken_text
+from spoken_text import normalize_spoken_text, has_spoken_content
+from prepare_audio_text import load_prepared
 from synthesis_chunking import ends_at_sentence_boundary, split_synthesis_text, parse_chunk_selector
+from synthesis_chunking import MAX_SYNTHESIS_CHARACTERS, split_chat_message
 
 
 DEFAULT_NARRATOR_EXAGGERATION = 0.4
@@ -56,10 +59,10 @@ def load_markdown_headings(
     manifest = load_json(resolve_book_manifest(book))
     chapter_path: Path | None = None
 
-    for chapter_value in manifest["chapters"]:
+    for index, chapter_value in enumerate(manifest["chapters"], 1):
         candidate = (book / str(chapter_value)).resolve()
 
-        if candidate.stem.lower() == chapter_id.lower():
+        if candidate.stem.lower() == chapter_id.lower() or chapter_id.lower() == f"chapter-{index:03d}":
             chapter_path = candidate
             break
 
@@ -72,7 +75,13 @@ def load_markdown_headings(
         "r",
         encoding="utf-8-sig",
     ) as stream:
+        first_line = True
         for line in stream:
+            stripped = line.strip().lstrip('\ufeff')
+            if first_line and stripped:
+                first_line = False
+                if re.match(r'^Chapter\s+(?:\d+|[IVXLCDM]+)\b', stripped, re.IGNORECASE):
+                    headings.add(stripped)
             match = re.match(
                 r"^[ \t]{0,3}#{1,6}[ \t]+"
                 r"(.+?)[ \t]*#*[ \t]*$",
@@ -88,10 +97,12 @@ def load_markdown_headings(
 def split_synthesis_units(
     text: str,
     headings: set[str],
+    max_characters: int = MAX_SYNTHESIS_CHARACTERS,
 ) -> list[tuple[str, float]]:
     """Split text and assign longer pauses after headings."""
     units: list[tuple[str, float]] = []
     ordinary_lines: list[str] = []
+    spoken_headings = {normalize_spoken_text(heading).strip() for heading in headings}
 
     def flush_ordinary() -> None:
         ordinary_text = "\n".join(ordinary_lines).strip()
@@ -100,7 +111,7 @@ def split_synthesis_units(
         if not ordinary_text:
             return
 
-        for chunk in split_synthesis_text(ordinary_text):
+        for chunk in split_synthesis_text(ordinary_text, max_characters=max_characters):
             pause = (
                 CHUNK_PAUSE_SECONDS
                 if ends_at_sentence_boundary(chunk)
@@ -110,8 +121,12 @@ def split_synthesis_units(
 
     for line in text.splitlines():
         stripped = line.strip()
+        chat_chunks = split_chat_message(stripped, max_characters)
 
-        if stripped and stripped in headings:
+        if chat_chunks is not None:
+            flush_ordinary()
+            units.extend((chunk, CHUNK_PAUSE_SECONDS) for chunk in chat_chunks)
+        elif stripped and (stripped in headings or stripped in spoken_headings):
             flush_ordinary()
             units.append((stripped, HEADING_PAUSE_SECONDS))
         else:
@@ -174,6 +189,12 @@ def file_sha256(path: Path) -> str:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def resume_chunk_is_reusable(chunk, text, pause, audio_path):
+    return bool(chunk and chunk.get("sourceText") == text and
+                chunk.get("pauseAfterSeconds", 0) == pause and audio_path.is_file() and
+                chunk.get("sha256") and file_sha256(audio_path) == chunk["sha256"])
 
 
 def chunks_are_reusable(
@@ -358,6 +379,12 @@ def main(
     )
 
     segments = artifact["script"]["segments"]
+    invalid_dialogue = [segment["index"] for segment in segments
+                        if segment.get("kind") == "dialogue" and not has_spoken_content(segment["sourceText"])]
+    if invalid_dialogue:
+        raise ValueError(f"Invalid empty dialogue segments {invalid_dialogue}; regenerate dialogue attribution before synthesis.")
+    prepared = load_prepared(book, args.chapter, artifact)
+    segments = [dict(segment, spokenText=prepared.get(segment["index"], segment.get("spokenText", segment["sourceText"]))) for segment in segments]
 
     if not segments:
         raise RuntimeError(
@@ -523,7 +550,7 @@ def main(
         segments = [dict(segment) for segment in segments]
         for segment in segments:
             checkpoint = checkpoint_segments.get(segment["index"], {})
-            for key in ("spokenText", "fragmentRewrite", "fragmentRewrites"):
+            for key in ("spokenText", "fragmentRewrite", "fragmentRewrites", "fragmentRewriteFailures", "synthesisMaxCharacters"):
                 if key in checkpoint:
                     segment[key] = checkpoint[key]
 
@@ -602,10 +629,12 @@ def main(
                     segment["sourceText"] and
                 chunks_are_reusable(
                     existing,
-                    split_synthesis_units(
-                        segment["sourceText"],
+                    apply_chunk_speech_overrides(split_synthesis_units(
+                        prepare_synthesis_text(normalize_spoken_text(apply_pronunciations(
+                            segment.get("spokenText", segment["sourceText"]), pronunciations))),
                         markdown_headings,
-                    ),
+                        max_characters=segment.get("synthesisMaxCharacters", MAX_SYNTHESIS_CHARACTERS),
+                    ), existing),
                     chapter_directory,
                 ) and
                 Path(
@@ -669,6 +698,8 @@ def main(
 
     if segments:
         if _CACHED_MODEL is None:
+            from cache_tokenizer import configure_tokenizer_cache
+            configure_tokenizer_cache()
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
             print()
@@ -750,13 +781,16 @@ def main(
         )
 
         synthesis_text = prepare_synthesis_text(
-            normalize_spoken_text(spoken_text)
+            normalize_spoken_text(apply_pronunciations(spoken_text, pronunciations))
         )
 
         synthesis_units = split_synthesis_units(
             synthesis_text,
             markdown_headings,
+            max_characters=segment.get("synthesisMaxCharacters", MAX_SYNTHESIS_CHARACTERS),
         )
+        previous_segment = next((item for item in manifest["segments"] if item["index"] == segment_index), None)
+        synthesis_units = apply_chunk_speech_overrides(synthesis_units, previous_segment)
 
         output_path = (
             chapter_directory /
@@ -795,11 +829,22 @@ def main(
             )
         }
 
-        if any(
-            not selected_chunks or segment_index in whole_segment_indexes or
-            (segment_index, chunk_index) in selected_chunks
-            for chunk_index in range(len(synthesis_units))
-        ):
+        resume_context_matches = bool(is_resume and existing_segment and
+            existing_segment.get("kind") == segment["kind"] and
+            existing_segment.get("speakerId") == speaker_id and
+            existing_segment.get("voiceId") == voice_id and
+            existing_segment.get("sourceText") == source_text and
+            existing_segment.get("spokenText", source_text) == spoken_text and
+            existing_segment.get("synthesis") == synthesis_settings and
+            existing_segment.get("pronunciationFingerprint") == pronunciation_fingerprint(source_text, pronunciations))
+        regenerate_chunks = {}
+        for chunk_index, (text, pause) in enumerate(synthesis_units):
+            regenerate = not selected_chunks or segment_index in whole_segment_indexes or (segment_index, chunk_index) in selected_chunks
+            if resume_context_matches:
+                regenerate = not resume_chunk_is_reusable(existing_chunks.get(chunk_index), text, pause,
+                    chapter_directory / f"segment-{segment_index:04d}-chunk-{chunk_index:04d}.wav")
+            regenerate_chunks[chunk_index] = regenerate
+        if any(regenerate_chunks.values()):
             model.prepare_conditionals(
                 str(voice_sample),
                 exaggeration=synthesis_settings["exaggeration"],
@@ -814,10 +859,7 @@ def main(
                 chapter_directory /
                 f"segment-{segment_index:04d}-chunk-{chunk_index:04d}.wav"
             )
-            regenerate_chunk = (
-                not selected_chunks or segment_index in whole_segment_indexes or segment_index in whole_segment_indexes or
-                (segment_index, chunk_index) in selected_chunks
-            )
+            regenerate_chunk = regenerate_chunks[chunk_index]
             existing_chunk = existing_chunks.get(chunk_index)
 
             if not regenerate_chunk:
@@ -961,6 +1003,8 @@ def main(
                 "sourceText": source_text,
             "spokenText": spoken_text,
             "fragmentRewrites": segment.get("fragmentRewrites", []),
+            "fragmentRewriteFailures": segment.get("fragmentRewriteFailures", []),
+            "synthesisMaxCharacters": segment.get("synthesisMaxCharacters", MAX_SYNTHESIS_CHARACTERS),
                 "pronunciationFingerprint":
                     pronunciation_fingerprint(
                         source_text,
@@ -981,6 +1025,8 @@ def main(
             }
         )
 
+        if previous_segment and previous_segment.get("chunkSpeechOverrides"):
+            generated_segment["chunkSpeechOverrides"] = previous_segment["chunkSpeechOverrides"]
         generated_segments.append(
             generated_segment
         )

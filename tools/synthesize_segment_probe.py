@@ -218,6 +218,8 @@ def main() -> int:
     print()
     print("Loading Chatterbox...", flush=True)
 
+    from cache_tokenizer import configure_tokenizer_cache
+    configure_tokenizer_cache()
     model = ChatterboxMultilingualTTS.from_pretrained(
         device=device,
         t3_model="v3",

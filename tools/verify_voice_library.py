@@ -35,6 +35,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def normalize_words(text: str) -> list[str]:
+    # Written symbols and clock suffixes have equivalent spoken forms.
+    text = text.replace('@', ' at ')
+    text = re.sub(r'\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?::(\d{2}))?\s*([ap])\.?\s*m\.?(?!\w)',
+                  lambda match: match.group(1) + (' ' + match.group(2) if match.group(2) else '') +
+                  ' ' + match.group(3).lower() + ' m', text, flags=re.IGNORECASE)
+    # An adjectival "why's she so bad" expands to "why is", not "why has".
+    # Keep ambiguous perfect-tense uses ("why's she left?") distinct.
+    text = re.sub(r"\bwhy['\u2019]s\s+(he|she|it|you|they)\s+((?:still\s+)?so\s+(?:bad|good|late|tired|sad|happy|angry))\b",
+                  r"why is \1 \2", text, flags=re.IGNORECASE)
+    # ASR varies the spelling of a standalone nasal hesitation. Keep mm
+    # measurements and the affirmative "mhm" distinct.
+    text = re.sub(r"\b(?:hm+|m{3,})\b", "hmm", text, flags=re.IGNORECASE)
     words = re.findall(
         r"[a-z0-9]+(?:'[a-z0-9]+)?",
         text.lower(),
@@ -54,10 +66,19 @@ def normalize_words(text: str) -> list[str]:
         "ten": "10",
     }
 
-    return [
-        number_words.get(word, word)
-        for word in words
-    ]
+    # These closed/open compound spellings have the same spoken form. Use a
+    # narrow list, not arbitrary word joining ("now here" != "nowhere").
+    compounds = {
+        "lifeform": ("life", "form"), "lifeforms": ("life", "forms"),
+        "medlab": ("med", "lab"), "bloodstain": ("blood", "stain"),
+        "bloodstains": ("blood", "stains"), "setup": ("set", "up"),
+        "scifi": ("sci", "fi"), "microcams": ("micro", "cams"),
+        "boyfailure": ("boy", "failure"), "facedown": ("face", "down"),
+        "textbox": ("text", "box"), "dialogue": ("dialog",),
+        "popo": ("po", "po"),
+    }
+    return [number_words.get(part, part)
+            for word in words for part in compounds.get(word, (word,))]
 
 
 def soundex(word: str) -> str:

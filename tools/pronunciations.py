@@ -7,17 +7,23 @@ from pathlib import Path
 
 from book_manifest import find_book_root
 
+AUTOMATIC_HANDLING_VERSION = 2
+
 def load_pronunciations(book: Path) -> list[dict]:
     """Load and validate generic pronunciation entries."""
     path = book / "pronunciations.json"
 
-    if not path.is_file():
+    automatic_path = book / "auto-pronunciations.json"
+    if not path.is_file() and not automatic_path.is_file():
         return []
 
-    with path.open("r", encoding="utf-8-sig") as stream:
-        document = json.load(stream)
-
+    document = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
     entries = document.get("entries", [])
+    manual_terms = {str(entry.get("canonical", "")).casefold() for entry in entries}
+    if automatic_path.is_file():
+        automatic = json.loads(automatic_path.read_text(encoding="utf-8-sig"))
+        entries = entries + [entry for entry in automatic.get("entries", [])
+                             if str(entry.get("canonical", "")).casefold() not in manual_terms]
     canonical_terms: set[str] = set()
 
     for entry in entries:
@@ -49,6 +55,11 @@ def load_pronunciations(book: Path) -> list[dict]:
             raise ValueError(
                 f"acceptedTranscriptions for '{canonical}' must be an array."
             )
+
+        if entry.get("mode") in ("validated-word-split", "letter-spelling-fallback"):
+            # Part of the synthesis/retry fingerprint: changed automatic
+            # comparison or chat chunking must invalidate affected audio.
+            entry["automaticHandlingVersion"] = AUTOMATIC_HANDLING_VERSION
 
     return sorted(
         entries,
@@ -97,6 +108,10 @@ def canonicalize_transcription(
 
     for entry in entries:
         canonical = str(entry["canonical"])
+        automatic = entry.get("mode") in ("validated-word-split", "letter-spelling-fallback")
+        # Compare automatic usernames as spoken words, not as one compressed
+        # token. Otherwise one ASR spelling error invalidates the whole label.
+        replacement = str(entry["spokenText"]) if automatic else canonical
         variants = {
             canonical,
             str(entry["spokenText"]),
@@ -108,17 +123,40 @@ def canonicalize_transcription(
                 )
             ),
         }
+        if automatic and re.fullmatch(r"[A-Za-z0-9_]+", canonical):
+            from chat_pronunciations import phonetic_spelling
+            phonetic = phonetic_spelling(canonical)
+            variants.add(phonetic)
+            # ASR can spell the G codeword "gulf". This alternative
+            # still decodes to G, and must match the entire encoded handle;
+            # another codeword or a missing letter is never accepted.
+            variants.add(phonetic.replace("Golf", "Gulf"))
 
         for variant in sorted(
             variants,
             key=len,
             reverse=True,
         ):
-            result = replace_term(
-                result,
-                variant,
-                canonical,
-            )
+            if automatic:
+                # Joining words or inserting punctuation does not change a
+                # handle's letters/digits. Never accept changed characters.
+                compact = re.sub(r"[^A-Za-z0-9]", "", variant)
+                if compact:
+                    pattern = r"(?<!\w)" + r"[\W_]*".join(re.escape(c) for c in compact) + r"(?!\w)"
+                    result = re.sub(pattern, lambda match: replacement, result, flags=re.IGNORECASE)
+            else:
+                result = replace_term(result, variant, replacement)
+
+        # A numeric handle may also be referred to by its exact text prefix
+        # in prose (Noobkiller9000 -> Noobkiller). Expand that prefix without
+        # adding the omitted numeric suffix or accepting a different name.
+        suffix = re.fullmatch(r"([A-Za-z_]+)(\d+)", canonical) if automatic else None
+        if suffix:
+            from spoken_text import integer_to_words
+            number = integer_to_words(int(suffix[2]))
+            spoken = str(entry["spokenText"])
+            if spoken.endswith(" " + number):
+                result = replace_term(result, suffix[1], spoken[:-(len(number) + 1)])
 
     return result
 

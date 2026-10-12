@@ -12,6 +12,50 @@ namespace StoryCast.Application.Tests.Casting;
 /// </summary>
 public sealed class CastingWorkflowTests
 {
+    /// <summary>An uncast speaker absent from this chapter cannot block unrelated production.</summary>
+    [Fact]
+    public async Task ExecuteAsync_OnlyCurrentSpeakersRequireNewVoices()
+    {
+        var store = new MemoryCastingPlanStore { Plan = new CastingPlan
+        { SchemaVersion = 1, BookId = "book-1", Assignments = [CreateAssignment("narrator", "narrator"), CreateAssignment("active", "active"), CreateAssignment("absent", "reserved")] }};
+        var service = new RecordingCastingService([]);
+        var workflow = new CastingWorkflow(new MemoryCharacterRegistryStore(CreateRegistry("active", "absent", "blocked-voice-request")),
+            new MemoryVerifiedVoiceLibrary(CreateVoices("narrator", "active", "reserved")), service,
+            new CastingAssignmentValidator(), store);
+        await workflow.ExecuteAsync(CreateBook(), @"C:\Voices", requiredSpeakers: new HashSet<string> { "active", "narrator" });
+        Assert.Equal(0, service.CallCount);
+        AssertAssignment(store.Plan!, "absent", "reserved");
+        Assert.DoesNotContain(store.Plan!.Assignments, assignment => assignment.CharacterId == "blocked-voice-request");
+    }
+
+    /// <summary>Counts retries once and keeps unused character voices reserved.</summary>
+    [Fact]
+    public async Task ExecuteAsync_UsageCountsDoNotReleaseVoices()
+    {
+        var store = new MemoryCastingPlanStore { Plan = new CastingPlan
+        {
+            SchemaVersion = 1, BookId = "book-1",
+            Assignments = [CreateAssignment("narrator", "narrator"), CreateAssignment("idle", "reserved"), CreateAssignment("active", "active")]
+        }};
+        var service = new RecordingCastingService([]);
+        var workflow = new CastingWorkflow(new MemoryCharacterRegistryStore(CreateRegistry("idle", "active")),
+            new MemoryVerifiedVoiceLibrary(CreateVoices("narrator", "reserved", "active")), service,
+            new CastingAssignmentValidator(), store);
+        var usage = new VoiceUsageContext
+        {
+            ChapterId = "chapter-020", ChapterIndex = 19, SourceSha256 = "hash",
+            CurrentRoleUseCounts = new Dictionary<string, int> { ["active"] = 2 },
+            History = new Dictionary<string, ChapterVoiceUsage>()
+        };
+        await workflow.ExecuteAsync(CreateBook(), @"C:\Voices", voiceUsage: usage);
+        await workflow.ExecuteAsync(CreateBook(), @"C:\Voices", voiceUsage: usage);
+        Assert.Equal(0, service.CallCount);
+        AssertAssignment(store.Plan!, "idle", "reserved");
+        Assert.Equal(0, store.Plan!.VoiceUseCounts["reserved"]);
+        Assert.Equal(2, store.Plan.VoiceUseCounts["active"]);
+        Assert.Empty(store.Plan.RetiredAssignments);
+    }
+
     /// <summary>
     /// Verifies that an existing narrator and character retain their voices
     /// while a newly discovered character receives an unused voice.

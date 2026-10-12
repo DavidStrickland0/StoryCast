@@ -3,6 +3,11 @@ from __future__ import annotations
 import re
 
 
+def has_spoken_content(text: str) -> bool:
+    """Quotation marks, separators and whitespace are not spoken dialogue."""
+    return any(character.isalnum() for character in text)
+
+
 ONES = (
     "zero", "one", "two", "three", "four",
     "five", "six", "seven", "eight", "nine",
@@ -108,6 +113,13 @@ def year_to_words(value: int) -> str:
 
 def normalize_spoken_text(text: str) -> str:
     """Expand numeric forms that commonly destabilize speech synthesis."""
+    # Read punctuation-only chat reactions literally instead of inventing a
+    # response or leaving a username followed by unpronounceable punctuation.
+    text = re.sub(
+        r"(\[[^\]\n:]+\([^\]\n:]+\)\s*:\s*)(\?{2,})(\s*\])",
+        lambda match: match[1] + integer_to_words(len(match[2])) + " question marks" + match[3],
+        text,
+    )
     def replace_dollars(match: re.Match[str]) -> str:
         amount = match.group("amount").replace(",", "")
         whole, _, fraction = amount.partition(".")
@@ -157,8 +169,14 @@ def normalize_spoken_text(text: str) -> str:
         flags=re.IGNORECASE,
     )
     result = re.sub(
-        r"(?<!\w)HP(?!\w)",
-        "H P",
+        r"(?<!\w)(HP|WTF|IRL|POV|JRPG)(?!\w)",
+        lambda match: " ".join(match[0].upper()),
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\b(?P<hour>\d{1,2})\.(?P<minute>[0-5]\d)\s*(?P<suffix>a\.?m\.?|p\.?m\.?)(?!\w)",
+        replace_time,
         result,
         flags=re.IGNORECASE,
     )

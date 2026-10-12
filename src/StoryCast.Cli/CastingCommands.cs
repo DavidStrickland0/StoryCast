@@ -5,6 +5,8 @@ using StoryCast.Infrastructure.Casting;
 using StoryCast.Infrastructure.Characters;
 using StoryCast.Infrastructure.Voices;
 using StoryCast.Ollama;
+using StoryCast.Infrastructure.Production;
+using StoryCast.Application.Preparation;
 
 internal static class CastingCommands
 {
@@ -51,7 +53,13 @@ internal static class CastingCommands
                 bookPath,
                 libraryPath,
                 model,
-                ollamaUrl);
+                ollamaUrl,
+                GetOptionValue(args, "--chapter"),
+                args.Contains("--auto-voices", StringComparer.OrdinalIgnoreCase),
+                GetOptionValue(args, "--voiceforge") ?? Path.GetFullPath(Path.Combine("..", "VoiceForge")),
+                GetOptionValue(args, "--voiceforge-image") ?? "voiceforge-design:dev",
+                GetOptionValue(args, "--worker-image") ?? "storycast-worker:dev",
+                GetOptionValue(args, "--whisper-model") ?? "small.en");
         }
         catch (ArgumentException exception)
         {
@@ -64,7 +72,8 @@ internal static class CastingCommands
         string bookPath,
         string libraryPath,
         string model,
-        string ollamaUrl)
+        string ollamaUrl,
+        string? chapterId, bool autoVoices, string voiceForge, string voiceForgeImage, string workerImage, string whisper)
     {
         try
         {
@@ -116,9 +125,33 @@ internal static class CastingCommands
             Console.WriteLine();
             Console.WriteLine("Assigning voices...");
 
+            VoiceUsageContext? usage = null;
+            IReadOnlySet<string>? requiredSpeakers = null;
+            if (chapterId is not null)
+            {
+                var artifact = await new FileSystemProductionScriptStore().LoadAsync(book, chapterId)
+                    ?? throw new InvalidDataException("Attribute the current chapter before casting.");
+                var chapter = book.Manuscript.Chapters.Single(chapter => chapter.Id == chapterId);
+                if (!string.Equals(artifact.SourceSha256, new ChapterTextPreparer().Prepare(chapter).SourceSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Current chapter attribution is stale; repeat attribution before casting.");
+                requiredSpeakers = artifact.Script.Segments.Select(segment => segment.SpeakerId).Append("narrator").ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
+            if (autoVoices)
+                await VoiceForgeProvisioning.EnsureAsync(book, libraryPath, verifiedVoiceLibrary, requiredSpeakers, chapterId,
+                    Path.Combine(voiceForge, "provision.py"), voiceForgeImage, workerImage, whisper, ollamaUrl, model);
+            if (chapterId is not null)
+            {
+                usage = await VoiceUsageContext.LoadAsync(book, chapterId,
+                    new FileSystemProductionScriptStore(), await new FileSystemCastingPlanStore().LoadAsync(book));
+                Console.WriteLine(usage is null
+                    ? "Voice counts unavailable: attribution history is missing or stale."
+                    : "Recording attributed speech counts. Voices remain reserved per character.");
+            }
             var result = await workflow.ExecuteAsync(
                 book,
-                libraryPath);
+                libraryPath,
+                voiceUsage: usage,
+                requiredSpeakers: requiredSpeakers);
 
             Console.WriteLine();
             Console.WriteLine("Automatic casting complete.");
@@ -142,7 +175,8 @@ internal static class CastingCommands
             IOException or
             HttpRequestException or
             UnauthorizedAccessException or
-            UriFormatException)
+            UriFormatException or
+            System.ComponentModel.Win32Exception)
         {
             Console.Error.WriteLine(
                 $"Automatic casting failed: {exception.Message}");

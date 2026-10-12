@@ -22,6 +22,258 @@ import produce_chapter
 
 
 class SegmentRetryTests(unittest.TestCase):
+    def test_exhausted_recognition_failure_exports_review_without_erasing_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            self.write_verification(verification, audio, {7: "fail"}, 1)
+            report = json.loads(verification.read_text())
+            report["segments"][0]["expectedWordCount"] = 20
+            verification.write_text(json.dumps(report))
+            with patch.object(produce_chapter, "run_stage", return_value=2) as stages:
+                produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / "voices", "chapter-001",
+                    root, manifest, "small.en", 1, [], max_fragment_rewrites=0, allow_review=True)
+            self.assertEqual(1, stages.call_count)
+            self.assertEqual("fail", json.loads(verification.read_text())["segments"][0]["status"])
+
+    def test_review_audio_continues_without_marking_verification_passed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            self.write_verification(verification, audio, {7: "review"}, 1)
+            with patch.object(produce_chapter, "run_stage", return_value=2) as stages:
+                produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / "voices", "chapter-001",
+                    root, manifest, "small.en", 3, [], max_fragment_rewrites=0, allow_review=True)
+            self.assertEqual(1, stages.call_count)
+            self.assertEqual("review", json.loads(verification.read_text())["segments"][0]["status"])
+
+    def test_upgraded_exhausted_run_actually_resynthesizes_only_rejected_chunks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            state_path = manifest.parent / "segment-retry-state.json"
+            state_path.write_text(json.dumps({
+                "settings": {"maxAttemptsPerWording": 3, "maxFragmentRewrites": 0, "totalAttempts": 3},
+                "attempt": 3, "pendingAction": "verify", "completed": False,
+                "rewriteCounts": {}, "bestCandidates": {},
+            }))
+            self.write_verification(verification, audio, {7: "fail"}, 3)
+            report = json.loads(verification.read_text())
+            report["segments"][0]["expectedWordCount"] = 20
+            report["chunks"] = [{"segmentIndex": 7, "chunkIndex": 0, "status": "fail"},
+                                {"segmentIndex": 7, "chunkIndex": 1, "status": "pass"}]
+            verification.write_text(json.dumps(report))
+            calls = []
+
+            def stage(name, arguments, allowed_exit_codes=(0,)):
+                calls.append((name, arguments))
+                if name.startswith("Selective synthesis"):
+                    self.assertNotIn("--segment-index", arguments)
+                    self.assertEqual("7:0", arguments[arguments.index("--chunk") + 1])
+                    self.assertNotIn("7:1", arguments)
+                    return 0
+                if name.endswith("2"):
+                    report["segments"][0]["status"] = "pass"
+                    report["chunks"][0]["status"] = "pass"
+                    report["summary"] = {"passed": 2, "review": 0, "failed": 0}
+                    verification.write_text(json.dumps(report))
+                    return 0
+                return 2
+
+            with patch.object(produce_chapter, "run_stage", side_effect=stage):
+                for _ in range(2):
+                    produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / "voices", "chapter-001", root,
+                                                                manifest, "small.en", 3, [], max_fragment_rewrites=0)
+            self.assertEqual(["Segment verification attempt 1", "Selective synthesis retry 1", "Segment verification attempt 2"],
+                             [name for name, _ in calls])
+            self.assertTrue(json.loads(state_path.read_text())["completed"])
+
+    def test_exhausted_legacy_chunks_receive_only_one_new_bounded_cycle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            state_path = manifest.parent / "segment-retry-state.json"
+            state_path.write_text(json.dumps({
+                "settings": {"maxAttemptsPerWording": 1, "maxFragmentRewrites": 0, "totalAttempts": 1},
+                "attempt": 1, "pendingAction": "verify", "completed": False,
+                "rewriteCounts": {}, "bestCandidates": {},
+            }))
+            self.write_verification(verification, audio, {7: "fail"}, 1)
+            report = json.loads(verification.read_text())
+            report["segments"][0]["expectedWordCount"] = 20
+            report["chunks"] = [{"segmentIndex": 7, "chunkIndex": 0, "status": "fail"},
+                                {"segmentIndex": 7, "chunkIndex": 1, "status": "pass"}]
+            verification.write_text(json.dumps(report))
+            with patch.object(produce_chapter, "run_stage", return_value=2) as runner:
+                for _ in range(2):
+                    with self.assertRaisesRegex(RuntimeError, "did not pass after"):
+                        produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / "voices", "chapter-001", root,
+                                                                    manifest, "small.en", 1, [], max_fragment_rewrites=0)
+                self.assertEqual(2, runner.call_count)
+                self.assertIn("--segment-index", runner.call_args.args[1])
+            archives = list((manifest.parent / "verification-history").glob("*/segment-retry-state.json"))
+            self.assertEqual(1, len(archives))
+            self.assertEqual(1, json.loads(state_path.read_text())["selectiveChunkRetryVersion"])
+            self.assertEqual(report, json.loads(verification.read_text()))
+
+    def test_restored_audio_restores_its_wording_without_overwriting_new_audio(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, _, audio = self.create_short_fragment_fixture(root)
+            candidate = root / 'candidate.wav'
+            candidate.write_bytes(audio[7].read_bytes())
+            document = json.loads(manifest.read_text())
+            document['segments'][0]['spokenText'] = 'New wording'
+            manifest.write_text(json.dumps(document))
+            state = {'bestCandidates': {'7': {'audioPath': str(candidate), 'attempt': 1,
+                                              'verification': {'expectedText': 'Original wording'}}}}
+            produce_chapter.align_restored_candidate_manifest(manifest, state)
+            self.assertEqual('Original wording', json.loads(manifest.read_text())['segments'][0]['spokenText'])
+            candidate.write_bytes(b'different audio')
+            document['segments'][0]['spokenText'] = 'New wording'
+            manifest.write_text(json.dumps(document))
+            produce_chapter.align_restored_candidate_manifest(manifest, state)
+            self.assertEqual('New wording', json.loads(manifest.read_text())['segments'][0]['spokenText'])
+
+    def test_changed_pronunciation_restarts_exhausted_cycle_and_archives_reports(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            document = json.loads(manifest.read_text())
+            document['segments'][0]['sourceText'] = '[Joinedhandle (Earth): Hi]'
+            manifest.write_text(json.dumps(document))
+            (root / 'auto-pronunciations.json').write_text(json.dumps({'entries': [
+                {'canonical': 'Joinedhandle', 'spokenText': 'Joined handle'}]}))
+            state_path = manifest.parent / 'segment-retry-state.json'
+            state_path.write_text(json.dumps({
+                'settings': {'maxAttemptsPerWording': 3, 'maxFragmentRewrites': 3, 'totalAttempts': 12},
+                'attempt': 12, 'pendingAction': 'verify', 'completed': False,
+                'rewriteCounts': {}, 'bestCandidates': {}}))
+            self.write_verification(verification, audio, {7: 'fail'}, 12)
+            def verify(name, arguments, allowed_exit_codes=(0,)):
+                self.assertEqual('Segment verification attempt 1', name)
+                self.write_verification(verification, audio, {7: 'pass'}, 1)
+                return 0
+            with patch.object(produce_chapter, 'run_stage', side_effect=verify) as runner:
+                produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / 'voices',
+                    'chapter-001', root, manifest, 'small.en', 3, [])
+                produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / 'voices',
+                    'chapter-001', root, manifest, 'small.en', 3, [])
+                self.assertEqual(1, runner.call_count)
+            archived = list((manifest.parent / 'verification-history').glob('*/segment-retry-state.json'))
+            self.assertEqual(1, len(archived))
+            self.assertEqual(12, json.loads(archived[0].read_text())['attempt'])
+
+    def test_unavailable_rewrite_uses_smaller_chunks_and_continues(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            calls, history = [], []
+            def stage(name, arguments, allowed_exit_codes=(0,)):
+                calls.append((name, arguments))
+                if name.startswith("Segment verification"):
+                    attempt = int(name.rsplit(" ", 1)[1])
+                    self.write_verification(verification, audio, {7: "pass" if attempt == 4 else "fail"}, attempt)
+                    report = json.loads(verification.read_text())
+                    report["segments"][0]["expectedWordCount"] = 20
+                    verification.write_text(json.dumps(report))
+                    return 0 if attempt == 4 else 2
+                if name.endswith("3"):
+                    saved = json.loads(manifest.read_text())["segments"][0]
+                    self.assertEqual(160, saved["synthesisMaxCharacters"])
+                    self.assertEqual("Fragment 7", saved["sourceText"])
+                return 0
+            with patch.object(produce_chapter, "run_stage", side_effect=stage), patch.object(
+                produce_chapter, "rewrite_short_fragment", side_effect=produce_chapter.FragmentRewriteUnavailable("unchanged response")) as rewrite:
+                produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / "voices", "chapter-001", root,
+                    manifest, "small.en", 3, history)
+                self.assertEqual(1, rewrite.call_count)
+            saved = json.loads(manifest.read_text())["segments"][0]
+            self.assertEqual("smaller-synthesis-chunks", saved["fragmentRewriteFailures"][0]["fallback"])
+            self.assertTrue(json.loads((manifest.parent / "segment-retry-state.json").read_text())["completed"])
+
+    def test_long_chunk_rejections_preserve_passing_chunks_across_retry_boundaries(self):
+        for rejected_status in ("fail", "review"):
+            for passes_after_rewrite in (True, False):
+                with self.subTest(status=rejected_status, passes=passes_after_rewrite), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    manifest, verification, audio_paths = self.create_short_fragment_fixture(root)
+                    calls, rewrites, history = [], [], []
+
+                    def stage(name, arguments, allowed_exit_codes=(0,)):
+                        calls.append((name, arguments))
+                        if not name.startswith("Segment verification"):
+                            return 0
+                        attempt = int(name.rsplit(" ", 1)[1])
+                        status = "pass" if passes_after_rewrite and attempt == 4 else rejected_status
+                        self.write_verification(verification, audio_paths, {7: status}, attempt)
+                        report = json.loads(verification.read_text())
+                        report["segments"][0]["expectedWordCount"] = 20
+                        report["chunks"] = [
+                            {"segmentIndex": 7, "chunkIndex": 0, "status": status,
+                             "expectedText": "He asked, sighing.", "transcription": "He asked sign.", "expectedWordCount": 3},
+                            {"segmentIndex": 7, "chunkIndex": 1, "status": "pass"},
+                        ]
+                        verification.write_text(json.dumps(report))
+                        return 0 if status == "pass" else 2
+
+                    def rewrite(*args):
+                        rewrites.append((args[1], args[2]))
+                        return "Rewritten narration with the same meaning."
+
+                    with patch.object(produce_chapter, "run_stage", side_effect=stage), patch.object(produce_chapter, "rewrite_short_fragment", side_effect=rewrite):
+                        def run():
+                            produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / "voices", "chapter-001", root, manifest, "small.en", 3, history, max_fragment_rewrites=1)
+                        if passes_after_rewrite:
+                            run()
+                        else:
+                            with self.assertRaisesRegex(RuntimeError, "did not pass after"):
+                                run()
+                    self.assertEqual([], rewrites)
+                    self.assertEqual(4 if passes_after_rewrite else 6, len(history))
+                    synthesis = [args for name, args in calls if name.startswith("Selective synthesis")]
+                    self.assertIn("--chunk", synthesis[0])
+                    for arguments in synthesis:
+                        self.assertNotIn("--segment-index", arguments)
+                        self.assertEqual("7:0", arguments[arguments.index("--chunk") + 1])
+                        self.assertNotIn("7:1", arguments)
+                    self.assertNotIn("synthesisMaxCharacters", json.loads(manifest.read_text())["segments"][0])
+
+    def test_resumes_legacy_large_segment_rewrite_as_selective_synthesis(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            self.write_verification(verification, audio, {7: "fail"}, 3)
+            report = json.loads(verification.read_text())
+            report["segments"][0]["expectedWordCount"] = 20
+            report["chunks"] = [{"segmentIndex": 7, "chunkIndex": 0, "status": "fail"},
+                                {"segmentIndex": 7, "chunkIndex": 1, "status": "pass"}]
+            verification.write_text(json.dumps(report))
+            (manifest.parent / "segment-retry-state.json").write_text(json.dumps({
+                "settings": {"maxAttemptsPerWording": 3, "maxFragmentRewrites": 1, "totalAttempts": 6},
+                "attempt": 3, "pendingAction": "rewrite", "unresolvedSegmentIndexes": [7],
+                "unresolvedChunks": [], "bestCandidates": {}, "rewriteCounts": {}, "completed": False,
+            }))
+            synthesis = []
+
+            def stage(name, arguments, allowed_exit_codes=(0,)):
+                if name.startswith("Selective synthesis"):
+                    synthesis.append(arguments)
+                    return 0
+                report["segments"][0]["status"] = "pass"
+                report["chunks"][0]["status"] = "pass"
+                report["summary"] = {"passed": 2, "review": 0, "failed": 0}
+                verification.write_text(json.dumps(report))
+                return 0
+
+            with patch.object(produce_chapter, "run_stage", side_effect=stage), patch.object(produce_chapter, "rewrite_short_fragment") as rewrite:
+                produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / "voices", "chapter-001", root,
+                                                            manifest, "small.en", 3, [], max_fragment_rewrites=1)
+                rewrite.assert_not_called()
+            self.assertEqual(1, len(synthesis))
+            self.assertNotIn("--segment-index", synthesis[0])
+            self.assertEqual("7:0", synthesis[0][synthesis[0].index("--chunk") + 1])
+
     def test_default_uses_three_tries_and_three_rewrites(self) -> None:
         with patch.object(
             sys,
@@ -109,6 +361,41 @@ class SegmentRetryTests(unittest.TestCase):
             "segments": segments,
         }
         path.write_text(json.dumps(report), encoding="utf-8")
+
+    def test_final_synthesis_checkpoint_is_verified_before_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            state_path = manifest.parent / "segment-retry-state.json"
+            state_path.write_text(json.dumps({"schemaVersion": 1,
+                "settings": {"maxAttemptsPerWording": 3, "maxFragmentRewrites": 3, "totalAttempts": 12},
+                "attempt": 13, "pendingAction": "verify", "completed": False,
+                "selectiveChunkRetryVersion": 1, "recognitionRecoveryVersion": 1,
+                "unresolvedSegmentIndexes": [7], "unresolvedChunks": [], "rewriteCounts": {}, "bestCandidates": {}}))
+            def verify(name, arguments, **kwargs):
+                self.assertEqual("Segment verification attempt 13", name)
+                self.write_verification(verification, audio, {7: "pass"}, 13)
+                return 0
+            with patch.object(produce_chapter, "run_stage", side_effect=verify) as stage:
+                produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / "voices",
+                    "chapter-001", root, manifest, "small.en", 3, [])
+            self.assertEqual(1, stage.call_count)
+            self.assertTrue(json.loads(state_path.read_text())["completed"])
+
+    def test_exhausted_checkpoint_cannot_silently_return_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            (manifest.parent / "segment-retry-state.json").write_text(json.dumps({"schemaVersion": 1,
+                "settings": {"maxAttemptsPerWording": 3, "maxFragmentRewrites": 3, "totalAttempts": 12},
+                "attempt": 14, "pendingAction": "verify", "completed": False,
+                "selectiveChunkRetryVersion": 1, "recognitionRecoveryVersion": 1,
+                "unresolvedSegmentIndexes": [7], "unresolvedChunks": [], "rewriteCounts": {}, "bestCandidates": {}}))
+            with patch.object(produce_chapter, "run_stage") as stage:
+                with self.assertRaisesRegex(RuntimeError, "budget exhausted"):
+                    produce_chapter.verify_segments_with_retries(TOOLS_DIRECTORY, root, root / "voices",
+                        "chapter-001", root, manifest, "small.en", 3, [])
+            stage.assert_not_called()
 
     def test_completed_retry_state_with_review_is_reverified(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -336,6 +623,7 @@ class SegmentRetryTests(unittest.TestCase):
                     "rewrite_short_fragment",
                     side_effect=fake_rewrite,
                 ),
+                self.assertRaisesRegex(RuntimeError, "still require review"),
             ):
                 produce_chapter.verify_segments_with_retries(
                     TOOLS_DIRECTORY,
@@ -666,6 +954,14 @@ class SegmentRetryTests(unittest.TestCase):
 
 
 class FragmentRewriteRecoveryTests(unittest.TestCase):
+    def test_empty_source_is_rejected_before_calling_model(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "chapter.json"
+            path.write_text(json.dumps({"segments": [{"index": 5, "speakerId": "adam", "sourceText": '"\n\n"'}]}))
+            with patch.object(produce_chapter.urllib.request, "urlopen") as request:
+                with self.assertRaisesRegex(ValueError, "refusing to invent"):
+                    produce_chapter.rewrite_short_fragment(path, 5, 1, "model", "http://ollama")
+                request.assert_not_called()
     def make_manifest(self, root):
         path = root / "chapter.json"
         path.write_text(json.dumps({"segments": [

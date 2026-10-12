@@ -1,7 +1,9 @@
 using System.Text.Json;
 using StoryCast.Application.Preparation;
+using StoryCast.Application.Production;
 using StoryCast.Domain.Manuscripts;
 using StoryCast.Infrastructure.Books;
+using StoryCast.Infrastructure.Production;
 
 internal static class IncrementalProductionCommands
 {
@@ -88,9 +90,16 @@ internal static class IncrementalProductionCommands
 
             var preparer = new ChapterTextPreparer();
             PreparedChapter? target = null;
+            var skippedChapters = (GetOptionValue(args, "--skip-chapters") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             foreach (var chapter in book.Manuscript.Chapters)
             {
+                if (skippedChapters.Contains(chapter.Id))
+                {
+                    continue;
+                }
                 var prepared = preparer.Prepare(chapter);
 
                 var completed = state.Chapters.Any(
@@ -178,6 +187,7 @@ internal static class IncrementalProductionCommands
 
             entry.Status = "analyzing";
             entry.Error = string.Empty;
+            entry.FailedStage = string.Empty;
             entry.UpdatedUtc = DateTimeOffset.UtcNow;
 
             await SaveStateAsync(
@@ -216,13 +226,15 @@ internal static class IncrementalProductionCommands
                     state,
                     entry,
                     "Character discovery failed.",
-                    characterExitCode);
+                    characterExitCode,
+                    "character discovery");
             }
 
             Console.WriteLine();
             Console.WriteLine(
                 "===== Dialogue attribution =====");
 
+            string? dialogueFailure = null;
             var dialogueExitCode =
                 await DialogueCommands.AttributeAsync(
                     [
@@ -232,8 +244,9 @@ internal static class IncrementalProductionCommands
                         "--ollama-url",
                         ollamaUrl,
                         "--chapter",
-                        target.ChapterId
-                    ]);
+                        target.ChapterId,
+                        .. (args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase) ? new[] { "--allow-review" } : Array.Empty<string>())
+                    ], message => dialogueFailure = message);
 
             if (dialogueExitCode != 0)
             {
@@ -241,8 +254,27 @@ internal static class IncrementalProductionCommands
                     statePath,
                     state,
                     entry,
-                    "Dialogue attribution failed.",
-                    dialogueExitCode);
+                    $"Dialogue attribution failed: {dialogueFailure ?? "No detailed error was returned."}",
+                    dialogueExitCode,
+                    "dialogue attribution");
+            }
+
+            if (args.Contains("--review-dialogue", StringComparer.OrdinalIgnoreCase) || args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase))
+            {
+                var artifact = await new FileSystemProductionScriptStore().LoadAsync(book, target.ChapterId)
+                    ?? throw new InvalidDataException("Attributed chapter script is missing.");
+                var uncertain = DialogueReviewPolicy.GetUncertainSegments(artifact.Script.Segments);
+                var reviewFolder = Path.Combine(bookPath, "production", "dialogue-review");
+                Directory.CreateDirectory(reviewFolder);
+                await File.WriteAllTextAsync(Path.Combine(reviewFolder, $"{target.ChapterId}.json"),
+                    JsonSerializer.Serialize(new { chapterId = target.ChapterId, sourceSha256 = artifact.SourceSha256,
+                        reviewRequired = uncertain.Count > 0, segments = uncertain }));
+                if (uncertain.Count > 0 && !args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase))
+                {
+                    return await RecordFailureAsync(statePath, state, entry,
+                        $"Dialogue needs review before synthesis: segments {string.Join(", ", uncertain)}.", 2,
+                        "dialogue review");
+                }
             }
 
             Console.WriteLine();
@@ -258,7 +290,14 @@ internal static class IncrementalProductionCommands
                         "--ollama-url",
                         ollamaUrl,
                         "--library",
-                        libraryPath
+                        libraryPath,
+                        "--chapter",
+                        target.ChapterId,
+                        "--worker-image", workerImage,
+                        "--whisper-model", whisperModel,
+                        .. (args.Contains("--auto-voices", StringComparer.OrdinalIgnoreCase) ? new[] { "--auto-voices" } : Array.Empty<string>()),
+                        .. (GetOptionValue(args, "--voiceforge") is { } forgePath ? new[] { "--voiceforge", forgePath } : Array.Empty<string>()),
+                        .. (GetOptionValue(args, "--voiceforge-image") is { } forgeImage ? new[] { "--voiceforge-image", forgeImage } : Array.Empty<string>())
                     ]);
 
             if (castingExitCode != 0)
@@ -268,7 +307,8 @@ internal static class IncrementalProductionCommands
                     state,
                     entry,
                     "Casting failed.",
-                    castingExitCode);
+                    castingExitCode,
+                    "casting");
             }
 
             entry.Status = "producing";
@@ -294,6 +334,8 @@ internal static class IncrementalProductionCommands
                 whisperModel
             };
 
+            if (args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase)) productionArguments.Add("--allow-review");
+
             productionArguments.Add(
                 resumeRun
                     ? "--resume-run"
@@ -312,11 +354,13 @@ internal static class IncrementalProductionCommands
                     state,
                     entry,
                     "Chapter production failed.",
-                    productionExitCode);
+                    productionExitCode,
+                    "chapter production");
             }
 
             entry.Status = "completed";
             entry.Error = string.Empty;
+            entry.FailedStage = string.Empty;
             entry.CompletedUtc = DateTimeOffset.UtcNow;
             entry.UpdatedUtc = entry.CompletedUtc.Value;
 
@@ -409,7 +453,7 @@ internal static class IncrementalProductionCommands
             }
 
             if (!await HasIncompleteChapterAsync(
-                    Path.GetFullPath(args[0])))
+                    Path.GetFullPath(args[0]), GetOptionValue(args, "--skip-chapters")))
             {
                 Console.WriteLine();
                 Console.WriteLine(
@@ -469,6 +513,28 @@ internal static class IncrementalProductionCommands
               --whisper-model <model>
                   Whisper verification model. Defaults to small.en.
 
+              --skip-chapters <chapter-ids>
+                  Comma-separated chapter IDs to leave for review. Used by
+                  ScribbleCast's persistent queue; skipped audio is not approved.
+
+              --auto-voices
+                  Create and verify missing compatible voices with VoiceForge.
+                  Requires voiceforge-design:dev. ScribbleCast enables this.
+
+              --voiceforge <path>
+                  VoiceForge project directory; defaults to ../VoiceForge.
+
+              --voiceforge-image <image>
+                  VoiceDesign image; defaults to voiceforge-design:dev.
+
+              --review-dialogue
+                  Stop before synthesis when dialogue confidence is below 0.8
+                  or its speaker is unresolved, unless --allow-review is enabled.
+
+              --allow-review
+                  Produce final MP3s with review findings preserved. ScribbleCast
+                  enables this option; failed audio integrity still stops export.
+
               --help, -h
                   Display this help.
             """);
@@ -502,6 +568,7 @@ internal static class IncrementalProductionCommands
               production\characters.json. Existing character and narrator
               voice assignments in production\casting.json are preserved.
               Only newly discovered roles receive unused verified voices.
+              Attributed speech counts are recorded without releasing voices.
 
             State:
               Incremental progress is stored in
@@ -525,13 +592,19 @@ internal static class IncrementalProductionCommands
               --whisper-model <model>
                   Whisper verification model. Defaults to small.en.
 
+              --skip-chapters <chapter-ids>
+                  Comma-separated chapter IDs to leave for review.
+
+              --review-dialogue
+                  Require resolved dialogue speakers and confidence >= 0.8.
+
               --help, -h
                   Display this help.
             """);
     }
 
     private static async Task<bool> HasIncompleteChapterAsync(
-        string bookPath)
+        string bookPath, string? skipped = null)
     {
         var book = await new FileSystemBookProjectLoader()
             .LoadAsync(bookPath);
@@ -546,10 +619,17 @@ internal static class IncrementalProductionCommands
             book.Id);
 
         var preparer = new ChapterTextPreparer();
+        var skippedChapters = (skipped ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         return book.Manuscript.Chapters.Any(
             chapter =>
             {
+                if (skippedChapters.Contains(chapter.Id))
+                {
+                    return false;
+                }
                 var prepared = preparer.Prepare(chapter);
 
                 return !state.Chapters.Any(
@@ -685,10 +765,12 @@ internal static class IncrementalProductionCommands
         IncrementalProductionState state,
         IncrementalChapterState entry,
         string message,
-        int exitCode)
+        int exitCode,
+        string failedStage = "")
     {
         entry.Status = "failed";
         entry.Error = message;
+        entry.FailedStage = failedStage;
         entry.UpdatedUtc = DateTimeOffset.UtcNow;
 
         await SaveStateAsync(
@@ -773,6 +855,8 @@ internal static class IncrementalProductionCommands
 
         public string Error { get; set; } =
             string.Empty;
+
+        public string FailedStage { get; set; } = string.Empty;
 
         public DateTimeOffset UpdatedUtc { get; set; }
 

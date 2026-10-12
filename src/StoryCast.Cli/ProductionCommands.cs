@@ -187,7 +187,8 @@ internal static class ProductionCommands
                 rewriteModel,
                 ollamaUrl,
                 containerRunDirectoryPath,
-                containerResumeRunPath);
+                containerResumeRunPath,
+                allowReview: args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase));
 
             const int maximumTransientRetries = 3;
 
@@ -224,7 +225,8 @@ internal static class ProductionCommands
                     rewriteModel,
                     ollamaUrl,
                     runDirectoryPath: null,
-                    resumeRunPath: retryResumePath);
+                    resumeRunPath: retryResumePath,
+                    allowReview: args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase));
             }
 
             Console.WriteLine();
@@ -295,7 +297,8 @@ internal static class ProductionCommands
         string rewriteModel,
         string ollamaUrl,
         string? runDirectoryPath,
-        string? resumeRunPath)
+        string? resumeRunPath,
+        bool allowReview = false)
     {
         var arguments = new List<string>
         {
@@ -310,6 +313,8 @@ internal static class ProductionCommands
             "--ollama-url",
             ollamaUrl
         };
+
+        if (allowReview) arguments.Add("--allow-review");
 
         if (runDirectoryPath is not null)
         {

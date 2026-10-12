@@ -63,15 +63,17 @@ public sealed class ProductionScriptSegmenter
 
             if (closingQuote < 0)
             {
+                var paragraphEnd = text.IndexOf("\n\n", openingQuote, StringComparison.Ordinal);
+                var end = paragraphEnd < 0 ? text.Length : paragraphEnd;
                 AddSegment(
                     segments,
                     text,
                     openingQuote,
-                    text.Length - openingQuote,
+                    end - openingQuote,
                     narratorId,
                     SegmentKind.Narration);
 
-                cursor = text.Length;
+                cursor = end;
                 continue;
             }
 
@@ -134,6 +136,12 @@ public sealed class ProductionScriptSegmenter
              index < text.Length;
              index++)
         {
+            // A missing closing mark must not pair with the opening mark of
+            // a later paragraph and invert every subsequent dialogue span.
+            if (text[index] == '\n' && index + 1 < text.Length && text[index + 1] == '\n')
+            {
+                return -1;
+            }
             if (text[index] == closingCharacter &&
                 !IsEscaped(text, index))
             {
@@ -177,7 +185,7 @@ public sealed class ProductionScriptSegmenter
             start,
             length);
 
-        if (string.IsNullOrWhiteSpace(sourceText) &&
+        if (!sourceText.Any(char.IsLetterOrDigit) &&
             segments.Count > 0)
         {
             var previous = segments[^1];
@@ -203,8 +211,7 @@ public sealed class ProductionScriptSegmenter
         }
 
         if (segments.Count == 1 &&
-            string.IsNullOrWhiteSpace(
-                segments[0].SourceText))
+            !segments[0].SourceText.Any(char.IsLetterOrDigit))
         {
             var leadingWhitespace = segments[0];
 
