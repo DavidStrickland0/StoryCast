@@ -12,6 +12,117 @@ namespace StoryCast.Application.Tests.Attribution;
 /// </summary>
 public sealed class DialogueAttributionServiceTests
 {
+    /// <summary>Rejects a valid ID that contradicts the explicitly identified speaker.</summary>
+    [Theory]
+    [InlineData("Continuation of Tim's response in the same paragraph; he introduces himself as Tim.")]
+    [InlineData("Narration describes Tim speaking with weariness and explains his project's progress.")]
+    [InlineData("The speaker is Tim, introducing himself.")]
+    [InlineData("Tim introduces himself as Tim.")]
+    [InlineData("Dialogue is attributed to Tim by his introduction.")]
+    [InlineData("Continuation of Tim’s explanation in the same paragraph.")]
+    public async Task AttributeAsync_ContradictorySpeakerEvidence_Retries(string rationale)
+    {
+        var script = new ProductionScriptSegmenter().Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-036", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = "He pushes his glasses up. \"I'm Tim.\""
+        });
+        var registry = CreateTimAndLunaRegistry();
+        var generator = new BatchGenerator((attempt, indexes, _) => JsonSerializer.Serialize(new
+        {
+            assignments = indexes.Select(index => new
+            {
+                segmentIndex = index, speakerId = attempt == 1 ? "luna" : "tim",
+                confidence = 0.95m, delivery = "calm", rationale
+            })
+        }));
+
+        var result = await new DialogueAttributionService(generator).AttributeAsync(script, registry);
+
+        Assert.Equal("tim", Assert.Single(result).SpeakerId);
+        Assert.Equal(2, generator.Requests.Count);
+        Assert.Contains("rationale identifies 'Tim'", generator.Requests[1].Prompt);
+    }
+
+    private static CharacterRegistry CreateTimAndLunaRegistry() => new()
+    {
+        SchemaVersion = 1, BookId = "test-book",
+        Characters = [CreateCharacter("tim", "Tim"), CreateCharacter("luna", "Luna")],
+        ProcessedChapterHashes = new Dictionary<string, string>()
+    };
+
+    /// <summary>A listener's name does not establish a contradiction.</summary>
+    [Theory]
+    [InlineData("Luna is addressing Tim directly.")]
+    [InlineData("Tim is the listener, not the speaker.")]
+    [InlineData("Conversational reply anchored by earlier dialogue tag 'Tim said'.")]
+    public async Task AttributeAsync_ListenerMention_DoesNotReject(string rationale)
+    {
+        var generator = new BatchGenerator((_, indexes, _) => JsonSerializer.Serialize(new
+        {
+            assignments = indexes.Select(index => new
+            {
+                segmentIndex = index, speakerId = "luna", confidence = 0.85m,
+                delivery = "calm", rationale
+            })
+        }));
+        var result = await new DialogueAttributionService(generator).AttributeAsync(CreateScript(), CreateTimAndLunaRegistry());
+        Assert.Single(generator.Requests);
+        Assert.All(result, assignment => Assert.Equal("luna", assignment.SpeakerId));
+    }
+
+    /// <summary>Shared aliases cannot be used to select one registry identity.</summary>
+    [Fact]
+    public async Task AttributeAsync_AmbiguousSpeakerName_DoesNotReject()
+    {
+        var registry = new CharacterRegistry
+        {
+            SchemaVersion = 1, BookId = "test-book",
+            Characters = [CreateCharacter("tim-01", "Tim"), CreateCharacter("tim-02", "Tim")],
+            ProcessedChapterHashes = new Dictionary<string, string>()
+        };
+        var generator = new BatchGenerator((_, indexes, _) => JsonSerializer.Serialize(new
+        {
+            assignments = indexes.Select(index => new
+            {
+                segmentIndex = index, speakerId = "tim-01", confidence = 0.75m,
+                delivery = "calm", rationale = "The speaker is Tim, identified by context."
+            })
+        }));
+        await new DialogueAttributionService(generator).AttributeAsync(CreateScript(), registry);
+        Assert.Single(generator.Requests);
+    }
+
+    /// <summary>Persistent contradictions cannot pass as confident assignments.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AttributeAsync_PersistentContradiction_FailsOrMarksForReview(bool allowReview)
+    {
+        var generator = new BatchGenerator((_, indexes, _) => JsonSerializer.Serialize(new
+        {
+            assignments = indexes.Select(index => new
+            {
+                segmentIndex = index, speakerId = "luna", confidence = 0.98m,
+                delivery = "calm", rationale = "Continuation of Tim's response."
+            })
+        }));
+        var service = new DialogueAttributionService(generator, allowReview);
+        if (allowReview)
+        {
+            var result = await service.AttributeAsync(CreateScript(), CreateTimAndLunaRegistry());
+            Assert.All(result, assignment => Assert.Equal(0m, assignment.Confidence));
+        }
+        else
+        {
+            var failure = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                service.AttributeAsync(CreateScript(), CreateTimAndLunaRegistry()));
+            Assert.Contains("rationale identifies 'Tim'", failure.Message);
+        }
+
+        Assert.Equal(3, generator.Requests.Count);
+    }
+
     /// <summary>Exhausted invalid responses produce provisional, explicitly uncertain audio assignments only when enabled.</summary>
     [Fact]
     public async Task AttributeAsync_ReviewModeFallsBackAfterBoundedInvalidResponses()
@@ -114,7 +225,7 @@ public sealed class DialogueAttributionServiceTests
         await new DialogueAttributionService(generator).AttributeAsync(script, CreateRegistry());
         var prompt = Assert.Single(generator.Requests).Prompt;
         var paragraphs = prompt.Split("here belong to their own paragraph, not the next turn):")[1]
-            .Split("Earlier batch assignments")[0].Trim();
+            .Split("Physical source lines")[0].Trim();
         using var document = JsonDocument.Parse(paragraphs);
         var turns = document.RootElement.EnumerateArray().ToArray();
         Assert.Equal(3, turns.Length);
@@ -253,9 +364,9 @@ public sealed class DialogueAttributionServiceTests
         });
     }
 
-    /// <summary>Untagged exchanges retain assigned turns across batch boundaries.</summary>
+    /// <summary>Later batches use source context without copying earlier model guesses.</summary>
     [Fact]
-    public async Task AttributeAsync_UntaggedExchange_CarriesSpeakerContinuity()
+    public async Task AttributeAsync_UntaggedExchange_DoesNotFeedBackSpeakerGuesses()
     {
         var text = "Miller faced Thorne.\n\n" + string.Join("\n\n",
             Enumerable.Range(0, 10).Select(index => $"\"Turn {index}.\""));
@@ -283,12 +394,64 @@ public sealed class DialogueAttributionServiceTests
 
         Assert.Equal(10, result.Count);
         Assert.Equal(2, generator.Requests.Count);
-        const string marker = "Earlier batch assignments (speaker continuity context):";
-        var context = generator.Requests[1].Prompt.Split(marker)[1].Split("Return exactly")[0].Trim();
+        Assert.All(generator.Requests, request =>
+        {
+            Assert.Contains("Miller faced Thorne.", request.Prompt);
+            Assert.Contains("Turn 0.", request.Prompt);
+            Assert.Contains("Turn 9.", request.Prompt);
+            Assert.DoesNotContain("Earlier batch assignments", request.Prompt);
+            Assert.DoesNotContain("Established two-person exchange.", request.Prompt);
+        });
+    }
+
+    /// <summary>Single newlines remain visible as distinct reply boundaries.</summary>
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public async Task AttributeAsync_SingleNewlineExchange_ProvidesDistinctSourceLines(string newline)
+    {
+        string[] lines = ["I said \"Hello\"", "\"Hello\"", "\"How are You\"", "\"I am fine\""];
+        var text = string.Join(newline, lines);
+        var script = new ProductionScriptSegmenter().Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-001", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = text
+        });
+        var generator = new BatchGenerator((_, indexes, _) => CompleteResponse(indexes));
+        await new DialogueAttributionService(generator).AttributeAsync(script, CreateRegistry());
+
+        var prompt = Assert.Single(generator.Requests).Prompt;
+        var context = prompt.Split("turn boundaries even when several turns share one paragraph):")[1]
+            .Split("Return exactly")[0].Trim();
         using var document = JsonDocument.Parse(context);
-        Assert.Equal(8, document.RootElement.GetArrayLength());
-        Assert.Equal("elias-thorne", document.RootElement[7].GetProperty("SpeakerId").GetString());
-        Assert.Equal(result[7].SegmentIndex, document.RootElement[7].GetProperty("SegmentIndex").GetInt32());
+        var turns = document.RootElement.EnumerateArray().ToArray();
+        Assert.Equal(4, turns.Length);
+        Assert.Equal(lines, turns.Select(turn => turn.GetProperty("Line").GetString()));
+        Assert.False(turns[0].GetProperty("BeginsQuotedLine").GetBoolean());
+        Assert.All(turns.Skip(1), turn => Assert.True(turn.GetProperty("BeginsQuotedLine").GetBoolean()));
+        Assert.Equal(text, string.Concat(script.Segments.Select(segment => segment.SourceText)));
+    }
+
+    /// <summary>Introductions and continued speeches are kept together at batch boundaries.</summary>
+    [Fact]
+    public async Task AttributeAsync_ParagraphWouldCrossBatchBoundary_KeepsQuotesTogether()
+    {
+        var text = string.Join("\n\n", Enumerable.Repeat("\"Earlier reply.\"", 7)) +
+            "\n\nHe looks up. \"Hello.\" He adjusts his glasses. \"I'm Tim.\" He nods. \"Nice to meet you.\"";
+        var script = new ProductionScriptSegmenter().Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-036", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = text
+        });
+        var generator = new BatchGenerator((_, indexes, _) => CompleteResponse(indexes));
+        var result = await new DialogueAttributionService(generator).AttributeAsync(script, CreateRegistry());
+
+        Assert.Equal(new[] { 7, 3 }, generator.Requests.Select(request => request.Indexes.Length));
+        Assert.Equal(script.Segments.Where(segment => segment.Kind == SegmentKind.Dialogue).Select(segment => segment.Index),
+            result.Select(assignment => assignment.SegmentIndex));
+        var introductionIndexes = script.Segments.Where(segment => segment.Kind == SegmentKind.Dialogue)
+            .Skip(7).Select(segment => segment.Index).ToArray();
+        Assert.Equal(introductionIndexes, generator.Requests[1].Indexes);
     }
 
     /// <summary>Verifies only an invalid batch is retried, with complete coverage.</summary>
@@ -385,6 +548,7 @@ public sealed class DialogueAttributionServiceTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Assert.Contains("Do not alternate mechanically", systemPrompt, StringComparison.Ordinal);
+            Assert.Contains("A single newline is enough to separate dialogue turns", systemPrompt, StringComparison.Ordinal);
             Assert.Contains("successive quoted paragraphs normally alternate speakers", systemPrompt, StringComparison.Ordinal);
             var array = jsonSchema.GetProperty("properties").GetProperty("assignments");
             var indexes = array.GetProperty("items").GetProperty("properties").GetProperty("segmentIndex")
