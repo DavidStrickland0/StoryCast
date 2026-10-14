@@ -38,6 +38,13 @@ DevContext.*
 # Local source voice recordings
 samples/
 
+# Downloaded model weights
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+
 # Local code snapshots and duplicate scratch test
 /build/
 *.before-*

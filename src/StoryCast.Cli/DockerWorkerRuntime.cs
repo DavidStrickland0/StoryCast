@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 internal sealed class DockerWorkerRuntime
 {
@@ -161,6 +162,7 @@ internal sealed class DockerWorkerRuntime
         {
             FileName = "docker",
             UseShellExecute = false,
+            RedirectStandardOutput = true,
             RedirectStandardError = true
         };
 
@@ -230,8 +232,12 @@ internal sealed class DockerWorkerRuntime
                 }
 
                 errorOutput.AppendLine(eventArgs.Data);
-                Console.Error.WriteLine(eventArgs.Data);
+                Console.Error.WriteLine(ToHostOutput(eventArgs.Data));
             };
+        process.OutputDataReceived += (_, eventArgs) =>
+        {
+            if (eventArgs.Data is not null) Console.WriteLine(ToHostOutput(eventArgs.Data));
+        };
 
         try
         {
@@ -250,6 +256,7 @@ internal sealed class DockerWorkerRuntime
         }
 
         process.BeginErrorReadLine();
+        process.BeginOutputReadLine();
 
         await process.WaitForExitAsync();
         process.WaitForExit();
@@ -257,6 +264,12 @@ internal sealed class DockerWorkerRuntime
         LastErrorOutput = errorOutput.ToString();
 
         return process.ExitCode;
+    }
+
+    internal string ToHostOutput(string text)
+    {
+        return Regex.Replace(text, @"(?<![A-Za-z0-9_])/(books|voices)(?=/|$)", match =>
+            (match.Groups[1].Value == "books" ? bookPath ?? "/books" : libraryPath).Replace('\\', '/'));
     }
 
     private static void AddMount(

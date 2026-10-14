@@ -389,6 +389,13 @@ static void WriteHelp()
           storycast produce chapter <book-directory> <chapter-id> [--library <path>] [--resume-run <path>] [--worker-image <image>]
           storycast produce book <book-directory> [--library <path>] [--resume-book-run <path>] [--worker-image <image>] [--chapter-pause <seconds>]
 
+        SoundForge ambience is enabled by default for chapter production. Matching
+        library sounds are reused; missing sounds are generated automatically.
+        Build C:\repos\SRD\SoundForge\run.ps1 -Build once. Use --no-ambience for
+        clean narration, --soundforge-url <url> for another service, or
+        --ambience-gain-db <-40..-12> to adjust the background level (default -22).
+        Add --remix to --resume-run when adding ambience to a completed chapter.
+
         Commands:
           voices list         Validate and display available voices.
           voices refresh      Rebuild, analyze, and verify the voice library.

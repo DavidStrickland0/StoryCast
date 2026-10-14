@@ -431,7 +431,7 @@ class SegmentRetryTests(unittest.TestCase):
                 "chapter.json"
             )
             chapter_manifest.write_text(
-                "{}\n",
+                '{"segments": []}\n',
                 encoding="utf-8",
             )
 
@@ -1028,7 +1028,7 @@ class ChunkRetryTests(unittest.TestCase):
                 "chapter.json"
             )
             chapter_manifest.write_text(
-                "{}\n",
+                '{"segments": []}\n',
                 encoding="utf-8",
             )
 

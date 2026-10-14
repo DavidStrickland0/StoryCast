@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from worker_device import whisper_options
 
-from faster_whisper import WhisperModel
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,6 +34,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def normalize_words(text: str) -> list[str]:
+    text = text.replace("\u2019", "'")
+    # Unambiguous auxiliary contractions share a spoken form with the
+    # expansion commonly returned by ASR. Do not expand ambiguous 's or 'd.
+    text = re.sub(r"\b([A-Za-z]+)'ve\b", r"\1 have", text, flags=re.IGNORECASE)
     # Written symbols and clock suffixes have equivalent spoken forms.
     text = text.replace('@', ' at ')
     text = re.sub(r'\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?::(\d{2}))?\s*([ap])\.?\s*m\.?(?!\w)',
@@ -76,6 +79,9 @@ def normalize_words(text: str) -> list[str]:
         "boyfailure": ("boy", "failure"), "facedown": ("face", "down"),
         "textbox": ("text", "box"), "dialogue": ("dialog",),
         "popo": ("po", "po"),
+        "treeline": ("tree", "line"), "treelines": ("tree", "lines"),
+        "doorframe": ("door", "frame"), "doorframes": ("door", "frames"),
+        "maybe": ("may", "be"),
     }
     return [number_words.get(part, part)
             for word in words for part in compounds.get(word, (word,))]
@@ -202,6 +208,7 @@ def transcribe(
 
 
 def main() -> int:
+    from faster_whisper import WhisperModel
     args = parse_args()
 
     library = args.library.resolve()

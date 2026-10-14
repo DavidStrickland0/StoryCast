@@ -11,6 +11,23 @@ namespace StoryCast.Application.Tests.Attribution;
 /// </summary>
 public sealed class CharacterDiscoveryServiceTests
 {
+    [Theory]
+    [InlineData("female", "male", "female")]
+    [InlineData("male", "female", "male")]
+    [InlineData("unspecified", "female", "unspecified")]
+    public async Task DiscoverAsync_PreservesEstablishedPresentationButRefinesUnspecified(
+        string established, string discovered, string expected)
+    {
+        var candidate = new { id = "maren", displayName = "Maren", aliases = Array.Empty<string>(),
+            description = "Companion", voiceTraits = Array.Empty<string>(), voicePresentation = discovered,
+            isNamed = true, importance = "major", isNarrator = false };
+        var generator = new StubStructuredTextGenerator(JsonSerializer.Serialize(new { characters = new[] { candidate } }));
+        var known = new CharacterProfile { Id = "maren", DisplayName = "Maren", IsNamed = true, VoicePresentation = established };
+        var result = await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), [known]);
+        Assert.Equal(expected, Assert.Single(result).VoicePresentation);
+        Assert.Equal(1, generator.Calls);
+    }
+
     /// <summary>A wrong unnamed flag must not duplicate a known named person.</summary>
     [Fact]
     public async Task DiscoverAsync_ReusesKnownNamedIdentityDespiteWrongUnnamedFlag()
@@ -276,6 +293,13 @@ public sealed class CharacterDiscoveryServiceTests
             JsonElement jsonSchema,
             CancellationToken cancellationToken = default)
         {
+            if (systemPrompt.StartsWith("Independently verify character voice presentations"))
+            {
+                using var input = JsonDocument.Parse(userPrompt);
+                return Task.FromResult(JsonSerializer.Serialize(new { characters = input.RootElement.GetProperty("characters")
+                    .EnumerateArray().Select(item => new { id = item.GetProperty("Id").GetString(),
+                        presentation = "unspecified", evidence = Array.Empty<string>() }).ToArray() }));
+            }
             UserPrompt = userPrompt;
             Schema = jsonSchema.Clone();
 

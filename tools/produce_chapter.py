@@ -18,6 +18,7 @@ from prepare_audio_text import prepare_chapter
 from spoken_text import has_spoken_content
 from pronunciations import load_pronunciations, pronunciation_fingerprint
 from chat_label_recovery import recover_chat_labels
+from context_pronunciations import prepare_context_pronunciations, digest as context_digest
 
 SYNTHESIS_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
 
@@ -154,7 +155,7 @@ def parse_args() -> argparse.Namespace:
         "--rewrite-model",
         default="qwen3.8:27b",
     )
-    parser.add_argument("--audio-preparation-model", default="qwen3.5:4b")
+    parser.add_argument("--audio-preparation-model", help="Defaults to the selected rewrite model.")
     parser.add_argument(
         "--ollama-url",
         default=(
@@ -167,6 +168,10 @@ def parse_args() -> argparse.Namespace:
         default=3,
     )
     parser.add_argument("--allow-review", action="store_true")
+    parser.add_argument("--no-ambience", action="store_true", help="Export clean narration without SoundForge ambience.")
+    parser.add_argument("--soundforge-url", default="http://host.docker.internal:7861")
+    parser.add_argument("--ambience-gain-db", type=float, default=-22)
+    parser.add_argument("--remix", action="store_true", help="Allow adding or changing ambience on a completed --resume-run-directory.")
     return parser.parse_args()
 
 
@@ -739,6 +744,9 @@ def verify_segments_with_retries(
     pronunciation_text = "\n".join(str(s.get("sourceText", "")) for s in manifest_for_pronunciations.get("segments", []))
     pronunciation_entries = load_pronunciations(book)
     current_pronunciation_hash = pronunciation_fingerprint(pronunciation_text, pronunciation_entries)
+    contextual = [segment.get("contextPronunciationFingerprint", "") for segment in manifest_for_pronunciations.get("segments", [])]
+    if any(contextual):
+        current_pronunciation_hash = context_digest([current_pronunciation_hash, contextual])
     empty_pronunciation_hash = pronunciation_fingerprint(pronunciation_text, [])
     previous_pronunciation_hash = state.get("pronunciationFingerprint", empty_pronunciation_hash)
     if current_pronunciation_hash != previous_pronunciation_hash:
@@ -918,6 +926,7 @@ def verify_segments_with_retries(
             continue
 
         if pending_action == "synthesize":
+            prepare_context_pronunciations(book, chapter_id, load_json(chapter_manifest)["segments"], rewrite_model, ollama_url)
             synthesis_arguments = [
                 sys.executable,
                 str(tools_directory / "synthesize_chapter_probe.py"),
@@ -1388,6 +1397,8 @@ def run_checkpointed_stage(
 
 def main() -> int:
     args = parse_args()
+    if args.remix and args.resume_run_directory is None:
+        raise ValueError("--remix requires --resume-run-directory.")
 
     if args.max_segment_attempts < 1:
         raise ValueError(
@@ -1477,9 +1488,9 @@ def main() -> int:
                 "requested book, voice library, or chapter."
             )
 
-        if report.get("status") == "completed":
+        if report.get("status") == "completed" and not args.remix:
             raise RuntimeError(
-                "A completed production run cannot be resumed."
+                "A completed production run requires --remix to change ambience while retaining its verified narration."
             )
 
         expected_settings = {
@@ -1566,7 +1577,7 @@ def main() -> int:
 
     try:
         current_stage = "audio text preparation"
-        prepare_chapter(book, args.chapter, args.audio_preparation_model, args.ollama_url)
+        prepare_chapter(book, args.chapter, args.audio_preparation_model or args.rewrite_model, args.ollama_url)
         current_stage = "synthesis"
 
         synthesis_worker = PersistentSynthesisWorker(
@@ -1621,6 +1632,7 @@ def main() -> int:
             tools_directory / "chat_label_recovery.py",
             tools_directory / "verify_voice_library.py",
             tools_directory / "pronunciations.py",
+            tools_directory / "context_pronunciations.py",
             tools_directory / "spoken_text.py",
             *segment_audio_paths(
                 chapter_manifest
@@ -1874,6 +1886,41 @@ def main() -> int:
             "chapter-export.json"
         )
 
+        export_audio = mastered_audio
+        report["ambienceEnabled"] = not args.no_ambience
+        if args.no_ambience:
+            report.pop("ambienceAudioPath", None)
+            report.pop("ambienceReportPath", None)
+        if not args.no_ambience:
+            from ambience import add_ambience
+            current_stage = "ambience"
+            ambience_audio = chapter_directory / f"{args.chapter}.ambience.wav"
+            ambience_report = chapter_directory / "ambience.json"
+            existing_ambience = load_json(ambience_report) if ambience_report.is_file() else {}
+            ambience_assets = [Path(cue["audioPath"]) for cue in existing_ambience.get("cues", [])]
+            ambience_base_inputs = [chapter_manifest, assembly_manifest, mastered_audio, mastered_verification_path,
+                                    tools_directory / "ambience.py"]
+            ambience_inputs = [*ambience_base_inputs, *ambience_assets]
+
+            def render_ambience():
+                add_ambience(chapter_manifest, assembly_manifest, mastered_audio,
+                             args.rewrite_model, args.ollama_url, args.soundforge_url, args.ambience_gain_db)
+                # Include newly downloaded assets in the first checkpoint, so
+                # a later resume can reuse it immediately and detect tampering.
+                ambience_inputs[:] = [*ambience_base_inputs,
+                                      *(Path(cue["audioPath"]) for cue in load_json(ambience_report)["cues"])]
+
+            run_checkpointed_stage(
+                "SoundForge ambience", "ambience", report, run_manifest_path,
+                ambience_inputs,
+                {"version": 1, "soundforgeUrl": args.soundforge_url, "model": args.rewrite_model,
+                 "gainDb": args.ambience_gain_db},
+                [ambience_report, ambience_audio],
+                render_ambience)
+            export_audio = ambience_audio
+            report["ambienceAudioPath"] = str(ambience_audio)
+            report["ambienceReportPath"] = str(ambience_report)
+
         current_stage = "MP3 export"
 
         run_checkpointed_stage(
@@ -1883,13 +1930,14 @@ def main() -> int:
             run_manifest_path,
             [
                 resolve_book_manifest(book),
-                mastered_audio,
+                export_audio,
                 mastered_verification_path,
                 tools_directory /
                 "export_chapter.py",
             ],
             {
                 "bitrate": "128k",
+                "ambienceEnabled": not args.no_ambience,
             },
             [
                 export_report_path,
@@ -1905,7 +1953,7 @@ def main() -> int:
                     ),
                     str(book),
                     args.chapter,
-                    str(mastered_audio),
+                    str(export_audio),
                     "--bitrate",
                     "128k",
                 ],
@@ -1935,6 +1983,8 @@ def main() -> int:
         print(f"Run:     {run_directory}")
         print(f"Chapter: {args.chapter}")
         print(f"Master:  {mastered_audio}")
+        if not args.no_ambience:
+            print(f"Mix:     {export_audio}")
         print(f"MP3:     {final_audio}")
 
         return 0

@@ -8,6 +8,20 @@ from verify_chapter_probe import verify_audio
 
 
 class IndependentVerificationTests(unittest.TestCase):
+    def test_character_name_hint_accepts_possessive_spelling_without_changing_other_words(self):
+        expected = "He paused, glancing at Elara's notes."
+        for hinted, should_pass in ((expected, True), ("He paused at Elara's notes.", False),
+                                    ("He shouted, glancing at Elara's notes.", False)):
+            with self.subTest(hinted=hinted):
+                model = SimpleNamespace(transcribe=Mock(side_effect=[
+                    ([SimpleNamespace(text="He paused, glancing at Alara's notes.")], None),
+                    ([SimpleNamespace(text=hinted)], None)]))
+                quality = {"maximumSilenceSeconds": .1, "leadingSilenceSeconds": .02, "trailingSilenceSeconds": .02}
+                with patch("torchaudio.load", return_value=(None, 24000)), patch("audio_postprocessing.analyze_audio", return_value=quality):
+                    report = verify_audio(model, Path("clip.wav"), expected, [], ["Elara"])
+                self.assertEqual(should_pass, report["nameHintAccepted"])
+                self.assertEqual(should_pass, report["status"] == "pass")
+
     def verify(self, expected, primary, secondary, quality=None):
         model = SimpleNamespace(transcribe=Mock(return_value=([SimpleNamespace(text=primary)], None)))
         backup = SimpleNamespace(model_name="medium.en", transcribe=Mock(return_value=secondary))

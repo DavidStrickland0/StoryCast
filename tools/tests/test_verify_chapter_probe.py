@@ -49,7 +49,7 @@ class RewrittenVerificationTests(unittest.TestCase):
                 with patch.dict(sys.modules, fake_modules), \
                      patch.object(sys, 'argv', ['verify_chapter_probe.py', str(manifest)]), \
                      patch.object(verify_chapter_probe, 'find_book_root', return_value=root), \
-                     patch.object(verify_chapter_probe, 'load_pronunciations', return_value={}), \
+                     patch.object(verify_chapter_probe, 'load_pronunciations', return_value=[]), \
                      patch.object(verify_chapter_probe, 'verify_audio', return_value=result):
                     code = verify_chapter_probe.main()
                 report = json.loads((root / 'verification.json').read_text())

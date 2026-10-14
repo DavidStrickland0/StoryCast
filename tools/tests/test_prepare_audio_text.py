@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from io import BytesIO
+from io import BytesIO, StringIO
+from contextlib import redirect_stdout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import prepare_audio_text as preparation
@@ -58,6 +59,44 @@ class AudioPreparationTests(unittest.TestCase):
                 path.write_text(json.dumps(saved))
                 with self.assertRaisesRegex(ValueError, "omitted segments"):
                     preparation.load_prepared(book, "chapter-001", artifact)
+
+    def test_itemizes_every_rejected_segment_with_original_and_proposed_text(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            book = Path(temporary)
+            scripts = book / "production" / "scripts"
+            scripts.mkdir(parents=True)
+            artifact = {"script": {"segments": [
+                {"index": 0, "speakerId": "narrator", "sourceText": "Jenny paid $12."},
+                {"index": 1, "speakerId": "adam", "sourceText": "We leave at dawn."},
+                {"index": 2, "speakerId": "adam", "sourceText": "Stay here."},
+            ]}}
+            (scripts / "chapter-001.json").write_text(json.dumps(artifact))
+            payloads = []
+
+            def reply(request, **kwargs):
+                prompt = json.loads(json.loads(request.data)["prompt"])
+                payloads.append(prompt)
+                replacements = {"0": "Jenny paid $13.", "1": "We leave.", "2": "Stay here!"}
+                response = {"segments": {str(s["index"]): replacements[str(s["index"])] for s in prompt["segments"]}}
+                return BytesIO(json.dumps({"response": json.dumps(response)}).encode())
+
+            output = StringIO()
+            with patch("chat_pronunciations.prepare_chat_pronunciations"), \
+                 patch.object(preparation.urllib.request, "urlopen", side_effect=reply), redirect_stdout(output):
+                path = preparation.prepare_chapter(book, "chapter-001", "model", "http://ollama")
+            for index, original, proposed in [(0, "Jenny paid $12.", "Jenny paid $13."), (1, "We leave at dawn.", "We leave.")]:
+                self.assertIn(f"Segment {index}: Changed or omitted spoken words", output.getvalue())
+                self.assertIn(f"Original text: {json.dumps(original)}", output.getvalue())
+                self.assertIn(f"Proposed text: {json.dumps(proposed)}", output.getvalue())
+            self.assertNotIn("Missing chapter segments", output.getvalue())
+            self.assertNotIn("Segment 2:", output.getvalue())
+            self.assertIn('Replace spoken words: "twelve" -> "thirteen"', output.getvalue())
+            self.assertIn('Delete spoken words: "at dawn" -> ""', output.getvalue())
+            self.assertEqual([0, 1], [s["index"] for s in payloads[1]["segments"]])
+            self.assertIn('Proposed text: "Jenny paid $13."', "\n".join(payloads[1]["previousValidationErrors"]))
+            saved = json.loads(path.read_text())
+            self.assertEqual([0, 1], saved["fallbackSegments"])
+            self.assertIn('Original text: "We leave at dawn."', "\n".join(saved["segments"][0]["validationErrors"]))
 
 
 if __name__ == "__main__":

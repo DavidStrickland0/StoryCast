@@ -50,9 +50,10 @@ public sealed partial class CharacterDiscoveryService
         narrator.
 
         Voice presentation must be male, female, or unspecified. Use male
-        or female only when names, pronouns, titles, or explicit description
-        provide clear evidence. Common gender-associated names count as evidence.
+        or female only when pronouns or explicit description provide clear
+        evidence referring to this character. Names alone are not evidence.
         Reevaluate previously unspecified presentations from the current chapter.
+        Preserve an existing male or female voice presentation for known characters.
         Never place male, female, or unspecified inside voiceTraits.
         Otherwise use unspecified.
         Do not infer traits unsupported by the supplied text. Voice traits
@@ -140,7 +141,31 @@ public sealed partial class CharacterDiscoveryService
                 {
                     throw new InvalidDataException("Character discovery returned invalid JSON.", exception);
                 }
-                return ValidateAndMap(response, knownCharacters, chapter.ChapterId);
+                var profiles = ValidateAndMap(response, knownCharacters, chapter.ChapterId);
+                var verified = await new CharacterPresentationVerifier(generator)
+                    .VerifyAsync(chapter.SpokenText, profiles, cancellationToken);
+                return profiles.Select(profile =>
+                {
+                    var presentation = verified[profile.Id];
+                    var known = knownCharacters.SingleOrDefault(character =>
+                        string.Equals(character.Id, profile.Id, StringComparison.OrdinalIgnoreCase));
+                    if (known?.VoicePresentation is "male" or "female")
+                    {
+                        if (presentation != "unspecified" && presentation != known.VoicePresentation)
+                            throw new InvalidDataException($"Character '{profile.Id}' has source-supported presentation '{presentation}' " +
+                                $"conflicting with saved '{known.VoicePresentation}'. Review the saved character profile and chapter prose.");
+                        presentation = known.VoicePresentation;
+                    }
+                    if (presentation != profile.VoicePresentation)
+                        Console.WriteLine($"Character '{profile.Id}': evidence review changed proposed presentation " +
+                            $"'{profile.VoicePresentation}' to '{presentation}'.");
+                    return new CharacterProfile {
+                        Id = profile.Id, DisplayName = profile.DisplayName, Aliases = profile.Aliases,
+                        Description = profile.Description, VoiceTraits = profile.VoiceTraits,
+                        VoicePresentation = presentation, IsNamed = profile.IsNamed,
+                        Importance = profile.Importance, IsNarrator = profile.IsNarrator
+                    };
+                }).ToArray();
             }
             catch (InvalidDataException exception) when (attempt < 3)
             {
@@ -246,6 +271,15 @@ public sealed partial class CharacterDiscoveryService
                         isNamed,
                         chapterId);
 
+            var presentation = ResolvePresentation(candidate.VoicePresentation, candidate.VoiceTraits);
+            if (hasExistingCharacter && existing!.VoicePresentation is "male" or "female")
+            {
+                if (presentation != "unspecified" && presentation != existing.VoicePresentation)
+                    Console.WriteLine($"Character '{existing.Id}': keeping established voice presentation " +
+                        $"'{existing.VoicePresentation}'; ignoring rediscovery '{presentation}'.");
+                presentation = existing.VoicePresentation;
+            }
+
             if (!returnedIds.Add(normalizedId))
             {
                 var previous = profiles.Single(profile => string.Equals(profile.Id, normalizedId, StringComparison.OrdinalIgnoreCase));
@@ -253,7 +287,7 @@ public sealed partial class CharacterDiscoveryService
                     previous.Description == candidate.Description.Trim() &&
                     previous.IsNamed == isNamed && previous.Importance == importance &&
                     previous.IsNarrator == candidate.IsNarrator &&
-                    previous.VoicePresentation == ResolvePresentation(candidate.VoicePresentation, candidate.VoiceTraits) &&
+                    previous.VoicePresentation == presentation &&
                     previous.Aliases.SequenceEqual(NormalizeValues(candidate.Aliases)) &&
                     previous.VoiceTraits.SequenceEqual(NormalizeVoiceTraits(candidate.VoiceTraits)))
                 {
@@ -273,9 +307,7 @@ public sealed partial class CharacterDiscoveryService
                     Description = candidate.Description.Trim(),
                     VoiceTraits = NormalizeVoiceTraits(
                         candidate.VoiceTraits),
-                    VoicePresentation = ResolvePresentation(
-                        candidate.VoicePresentation,
-                        candidate.VoiceTraits),
+                    VoicePresentation = presentation,
                     IsNamed = isNamed,
                     Importance = importance,
                     IsNarrator = candidate.IsNarrator

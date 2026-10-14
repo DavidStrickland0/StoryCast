@@ -152,7 +152,7 @@ def verify_audio(
         )
         hinted_text = " ".join(item.text.strip() for item in hinted_segments).strip()
         hinted_words = normalize_words(normalize_spoken_text(canonicalize_transcription(hinted_text, pronunciations)))
-        name_words = {word for name in names for word in normalize_words(name)}
+        name_words = {word for name in names for form in (name, name + "'s") for word in normalize_words(form)}
         hinted_distance = edit_distance(expected_words, hinted_words)
         # A name hint may correct spelling, but cannot add missing speech,
         # change dialogue, or remove repetitions/numbers from the transcript.
@@ -297,7 +297,7 @@ def main() -> int:
     policy_inputs = {"model": args.model, "secondaryModel": args.secondary_model,
                      "pronunciations": pronunciations, "characterNames": sorted(character_names)}
     policy_digest = hashlib.sha256(json.dumps(policy_inputs, sort_keys=True).encode())
-    for filename in ("verify_chapter_probe.py", "verify_voice_library.py", "secondary_transcription.py", "pronunciations.py", "spoken_text.py"):
+    for filename in ("verify_chapter_probe.py", "verify_voice_library.py", "secondary_transcription.py", "pronunciations.py", "context_pronunciations.py", "spoken_text.py"):
         policy_digest.update((Path(__file__).parent / filename).read_bytes())
     policy = policy_digest.hexdigest()
     prior_chunks = {(item["segmentIndex"], item["chunkIndex"]): item for item in existing_report.get("chunks", [])}
@@ -355,7 +355,9 @@ def main() -> int:
                                            chunk_audio, chunk["sourceText"], policy)
             reused = result is not None
             if result is None:
-                result = verify_audio(model, chunk_audio, chunk["sourceText"], pronunciations,
+                contextual = [{"canonical": item["word"], "spokenText": item["synthesisText"]}
+                              for item in chunk.get("contextPronunciations", [])]
+                result = verify_audio(model, chunk_audio, chunk["sourceText"], contextual + pronunciations,
                                       character_names, secondary_verifier)
                 result["verificationPolicy"] = policy
                 result["audioSha256"] = hashlib.sha256(chunk_audio.read_bytes()).hexdigest() if chunk_audio.is_file() else None

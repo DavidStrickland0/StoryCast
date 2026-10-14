@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import urllib.request
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from spoken_text import normalize_spoken_text
@@ -90,6 +91,8 @@ def prepare_chapter(book, chapter, model, ollama_url):
         saved = json.loads(path.read_text(encoding="utf-8"))
         if saved.get("version") == VERSION and saved.get("scriptSha256") == fingerprint and saved.get("model") == model:
             load_prepared(book, chapter, artifact)
+            from context_pronunciations import prepare_context_pronunciations
+            prepare_context_pronunciations(book, chapter, saved["segments"], model, ollama_url)
             print(f"Using existing audio preparation: {path}", flush=True)
             return path
     segments = artifact["script"]["segments"]
@@ -122,16 +125,38 @@ def prepare_chapter(book, chapter, model, ollama_url):
             try:
                 with urllib.request.urlopen(request, timeout=300) as response:
                     result = json.loads(json.loads(response.read())["response"])["segments"]
-                if not isinstance(result, dict) or set(result) != set(keys):
-                    raise ValueError("Missing or unknown segment index.")
+                if not isinstance(result, dict):
+                    raise ValueError("Expected a segments object mapping indexes to spoken text.")
+                if set(result) != set(keys):
+                    missing = sorted(set(keys) - set(result), key=int)
+                    unknown = sorted(set(result) - set(keys))
+                    raise ValueError(f"Segment index mismatch. Missing: {missing}; unknown: {unknown}.")
+                failures = []
                 for key, replacement in result.items():
                     index = int(key)
                     try:
                         accepted[index] = validate_replacement(originals[index], replacement, vocabulary)
-                    except ValueError as error:
-                        errors.append(f"Segment {index}: {error}")
+                    except (ValueError, TypeError) as error:
+                        detail = (
+                            f"Segment {index}: {error}\n"
+                            f"  Original text: {json.dumps(originals[index], ensure_ascii=False)}\n"
+                            f"  Proposed text: {json.dumps(replacement, ensure_ascii=False)}"
+                        )
+                        if isinstance(replacement, str):
+                            original_words = tokens(originals[index], vocabulary)
+                            proposed_words = tokens(replacement, vocabulary)
+                            for kind, old_start, old_end, new_start, new_end in SequenceMatcher(
+                                    None, original_words, proposed_words, autojunk=False).get_opcodes():
+                                if kind == "equal":
+                                    continue
+                                old = " ".join(original_words[old_start:old_end])
+                                new = " ".join(proposed_words[new_start:new_end])
+                                detail += f"\n  {kind.capitalize()} spoken words: {json.dumps(old, ensure_ascii=False)} -> {json.dumps(new, ensure_ascii=False)}"
+                        errors.append(detail)
+                        failures.append(index)
+                        print(f"Audio preparation validation failed:\n{detail}", flush=True)
                 if accepted.keys() != originals.keys():
-                    raise ValueError("Missing chapter segments.")
+                    raise ValueError(f"Text validation failed for segments {sorted(failures)}; retrying only these segments.")
                 break
             except (OSError, ValueError, KeyError, TypeError) as error:
                 errors.append(str(error))
@@ -151,6 +176,8 @@ def prepare_chapter(book, chapter, model, ollama_url):
     temporary.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     temporary.replace(path)
     load_prepared(book, chapter, artifact)
+    from context_pronunciations import prepare_context_pronunciations
+    prepare_context_pronunciations(book, chapter, prepared, model, ollama_url)
     print(f"Audio preparation saved: {path} ({report['changedSegments']} changed segments)", flush=True)
     return path
 

@@ -40,6 +40,7 @@ internal static class BookProductionCommands
 
             var libraryPath = Path.GetFullPath(
                 GetOptionValue(args, "--library") ??
+                AudioGenerationSettings.String(bookPath, "voiceLibraryPath") ??
                 Path.Combine(
                     Directory.GetCurrentDirectory(),
                     "voices"));
@@ -380,10 +381,8 @@ internal static class BookProductionCommands
                             "completed",
                             StringComparison.Ordinal))
                     {
-                        var recoveredAudioPath = Path.Combine(
-                            chapter.RunDirectory,
-                            chapter.ChapterId,
-                            $"{chapter.ChapterId}.mastered.wav");
+                        var recoveredAudioPath = SoundForgeRuntime.PreferredAudio(chapter.RunDirectory, chapter.ChapterId,
+                            SoundForgeRuntime.ReadSettings(book.RootPath, args).Enabled);
 
                         if (!File.Exists(recoveredAudioPath))
                         {
@@ -427,6 +426,12 @@ internal static class BookProductionCommands
                     "--worker-image",
                     workerImage
                 };
+                if (args.Contains("--no-ambience", StringComparer.OrdinalIgnoreCase)) chapterArguments.Add("--no-ambience");
+                if (args.Contains("--no-auto-voices", StringComparer.OrdinalIgnoreCase)) chapterArguments.Add("--no-auto-voices");
+                foreach (var option in new[] { "--soundforge-url", "--ambience-gain-db", "--voiceforge", "--voiceforge-image", "--rewrite-model", "--audio-preparation-model" })
+                {
+                    if (GetOptionValue(args, option) is { } optionValue) chapterArguments.AddRange([option, optionValue]);
+                }
 
                 if (hasChapterRun)
                 {
@@ -481,10 +486,8 @@ internal static class BookProductionCommands
                         $"{chapterRunManifestPath}");
                 }
 
-                var masteredAudioPath = Path.Combine(
-                    chapter.RunDirectory,
-                    chapter.ChapterId,
-                    $"{chapter.ChapterId}.mastered.wav");
+                var masteredAudioPath = SoundForgeRuntime.PreferredAudio(chapter.RunDirectory, chapter.ChapterId,
+                    SoundForgeRuntime.ReadSettings(book.RootPath, args).Enabled);
 
                 if (!File.Exists(masteredAudioPath))
                 {

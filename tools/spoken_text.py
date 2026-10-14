@@ -112,7 +112,8 @@ def year_to_words(value: int) -> str:
 
 
 def normalize_spoken_text(text: str) -> str:
-    """Expand numeric forms that commonly destabilize speech synthesis."""
+    """Normalize synthesis punctuation and expand unstable numeric forms."""
+    text = text.translate(str.maketrans({"\u2019": "'", "\u2018": "'"}))
     # Read punctuation-only chat reactions literally instead of inventing a
     # response or leaving a username followed by unpronounceable punctuation.
     text = re.sub(

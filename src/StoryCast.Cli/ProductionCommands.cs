@@ -30,6 +30,7 @@ internal static class ProductionCommands
 
             var libraryPath = Path.GetFullPath(
                 GetOptionValue(args, "--library") ??
+                AudioGenerationSettings.String(bookPath, "voiceLibraryPath") ??
                 Path.Combine(
                     Directory.GetCurrentDirectory(),
                     "voices"));
@@ -51,6 +52,7 @@ internal static class ProductionCommands
                 GetOptionValue(
                     args,
                     "--rewrite-model") ??
+                AudioGenerationSettings.String(bookPath, "rewriteModel") ??
                 Environment.GetEnvironmentVariable(
                     "STORYCAST_OLLAMA_MODEL") ??
                 "qwen3.8:27b";
@@ -82,6 +84,8 @@ internal static class ProductionCommands
                     ? null
                     : Path.GetFullPath(
                         resumeRunValue);
+            var remix = args.Contains("--remix", StringComparer.OrdinalIgnoreCase);
+            if (remix && resumeRunPath is null) throw new ArgumentException("--remix requires --resume-run.");
 
             if (runDirectoryPath is not null &&
                 resumeRunPath is not null)
@@ -96,6 +100,18 @@ internal static class ProductionCommands
                     args,
                     "--worker-image") ??
                 "storycast-worker:dev";
+
+            var ambience = SoundForgeRuntime.ReadSettings(bookPath, args);
+            var castingUrl = new Uri(ollamaUrl);
+            var hostOllama = castingUrl.Host == "host.docker.internal" ? new UriBuilder(castingUrl) { Host = "localhost" }.Uri.ToString() : ollamaUrl;
+            var castingArguments = new List<string> { bookPath, "--chapter", chapterId, "--model", rewriteModel,
+                "--library", libraryPath, "--ollama-url", hostOllama, "--worker-image", workerImage, "--whisper-model", whisperModel };
+            if (args.Contains("--no-auto-voices", StringComparer.OrdinalIgnoreCase)) castingArguments.Add("--no-auto-voices");
+            foreach (var option in new[] { "--voiceforge", "--voiceforge-image" })
+                if (GetOptionValue(args, option) is { } optionValue) castingArguments.AddRange([option, optionValue]);
+            if (await CastingCommands.AssignAsync(castingArguments.ToArray()) != 0)
+                throw new InvalidDataException("Chapter audio requires a verified casting plan matching the character attributes.");
+            await SoundForgeRuntime.EnsureAsync(ambience);
 
             if (!Directory.Exists(bookPath))
             {
@@ -188,7 +204,10 @@ internal static class ProductionCommands
                 ollamaUrl,
                 containerRunDirectoryPath,
                 containerResumeRunPath,
-                allowReview: args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase));
+                allowReview: args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase),
+                ambience: ambience,
+                remix: remix,
+                preparationModel: GetOptionValue(args, "--audio-preparation-model") ?? AudioGenerationSettings.String(bookPath, "audioPreparationModel") ?? rewriteModel);
 
             const int maximumTransientRetries = 3;
 
@@ -226,7 +245,10 @@ internal static class ProductionCommands
                     ollamaUrl,
                     runDirectoryPath: null,
                     resumeRunPath: retryResumePath,
-                    allowReview: args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase));
+                    allowReview: args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase),
+                    ambience: ambience,
+                    remix: remix,
+                    preparationModel: GetOptionValue(args, "--audio-preparation-model") ?? AudioGenerationSettings.String(bookPath, "audioPreparationModel") ?? rewriteModel);
             }
 
             Console.WriteLine();
@@ -298,7 +320,10 @@ internal static class ProductionCommands
         string ollamaUrl,
         string? runDirectoryPath,
         string? resumeRunPath,
-        bool allowReview = false)
+        bool allowReview = false,
+        SoundForgeRuntime.Settings? ambience = null,
+        bool remix = false,
+        string? preparationModel = null)
     {
         var arguments = new List<string>
         {
@@ -315,6 +340,14 @@ internal static class ProductionCommands
         };
 
         if (allowReview) arguments.Add("--allow-review");
+        if (remix) arguments.Add("--remix");
+        if (preparationModel is not null) arguments.AddRange(["--audio-preparation-model", preparationModel]);
+        if (ambience is { Enabled: false }) arguments.Add("--no-ambience");
+        if (ambience is { Enabled: true })
+        {
+            arguments.AddRange(["--soundforge-url", ambience.WorkerUrl, "--ambience-gain-db",
+                ambience.GainDb.ToString(System.Globalization.CultureInfo.InvariantCulture)]);
+        }
 
         if (runDirectoryPath is not null)
         {

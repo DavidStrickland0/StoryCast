@@ -53,6 +53,7 @@ internal static class IncrementalProductionCommands
 
             var libraryPath = Path.GetFullPath(
                 GetOptionValue(args, "--library") ??
+                AudioGenerationSettings.String(bookPath, "voiceLibraryPath") ??
                 Path.Combine(
                     Directory.GetCurrentDirectory(),
                     "voices"));
@@ -296,6 +297,7 @@ internal static class IncrementalProductionCommands
                         "--worker-image", workerImage,
                         "--whisper-model", whisperModel,
                         .. (args.Contains("--auto-voices", StringComparer.OrdinalIgnoreCase) ? new[] { "--auto-voices" } : Array.Empty<string>()),
+                        .. (args.Contains("--no-auto-voices", StringComparer.OrdinalIgnoreCase) ? new[] { "--no-auto-voices" } : Array.Empty<string>()),
                         .. (GetOptionValue(args, "--voiceforge") is { } forgePath ? new[] { "--voiceforge", forgePath } : Array.Empty<string>()),
                         .. (GetOptionValue(args, "--voiceforge-image") is { } forgeImage ? new[] { "--voiceforge-image", forgeImage } : Array.Empty<string>())
                     ]);
@@ -335,6 +337,12 @@ internal static class IncrementalProductionCommands
             };
 
             if (args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase)) productionArguments.Add("--allow-review");
+            if (args.Contains("--no-ambience", StringComparer.OrdinalIgnoreCase)) productionArguments.Add("--no-ambience");
+            if (args.Contains("--no-auto-voices", StringComparer.OrdinalIgnoreCase)) productionArguments.Add("--no-auto-voices");
+            foreach (var option in new[] { "--soundforge-url", "--ambience-gain-db", "--voiceforge", "--voiceforge-image", "--audio-preparation-model" })
+            {
+                if (GetOptionValue(args, option) is { } optionValue) productionArguments.AddRange([option, optionValue]);
+            }
 
             productionArguments.Add(
                 resumeRun
@@ -368,10 +376,8 @@ internal static class IncrementalProductionCommands
                 statePath,
                 state);
 
-            var audioPath = Path.Combine(
-                entry.RunDirectory,
-                target.ChapterId,
-                $"{target.ChapterId}.mastered.wav");
+            var audioPath = SoundForgeRuntime.PreferredAudio(entry.RunDirectory, target.ChapterId,
+                SoundForgeRuntime.ReadSettings(bookPath, args).Enabled);
 
             Console.WriteLine();
             Console.WriteLine(
@@ -518,8 +524,12 @@ internal static class IncrementalProductionCommands
                   ScribbleCast's persistent queue; skipped audio is not approved.
 
               --auto-voices
-                  Create and verify missing compatible voices with VoiceForge.
-                  Requires voiceforge-design:dev. ScribbleCast enables this.
+                  Enabled by default: reuse attributed voices or generate and
+                  verify missing matches with VoiceForge. Existing fallback
+                  assignments are rechecked before chapter production.
+
+              --no-auto-voices
+                  Disable provisioning; fail if attributed matches are missing.
 
               --voiceforge <path>
                   VoiceForge project directory; defaults to ../VoiceForge.

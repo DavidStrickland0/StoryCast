@@ -34,6 +34,7 @@ internal static class CastingCommands
 
             var libraryPath =
                 GetOptionValue(args, "--library") ??
+                AudioGenerationSettings.String(bookPath, "voiceLibraryPath") ??
                 Path.Combine(
                     Directory.GetCurrentDirectory(),
                     "voices");
@@ -55,9 +56,9 @@ internal static class CastingCommands
                 model,
                 ollamaUrl,
                 GetOptionValue(args, "--chapter"),
-                args.Contains("--auto-voices", StringComparer.OrdinalIgnoreCase),
-                GetOptionValue(args, "--voiceforge") ?? Path.GetFullPath(Path.Combine("..", "VoiceForge")),
-                GetOptionValue(args, "--voiceforge-image") ?? "voiceforge-design:dev",
+                AudioGenerationSettings.AutoVoices(bookPath, args),
+                GetOptionValue(args, "--voiceforge") ?? AudioGenerationSettings.VoiceForgeRoot(bookPath),
+                GetOptionValue(args, "--voiceforge-image") ?? AudioGenerationSettings.String(bookPath, "voiceForgeImage") ?? "voiceforge-design:dev",
                 GetOptionValue(args, "--worker-image") ?? "storycast-worker:dev",
                 GetOptionValue(args, "--whisper-model") ?? "small.en");
         }
@@ -136,9 +137,8 @@ internal static class CastingCommands
                     throw new InvalidDataException("Current chapter attribution is stale; repeat attribution before casting.");
                 requiredSpeakers = artifact.Script.Segments.Select(segment => segment.SpeakerId).Append("narrator").ToHashSet(StringComparer.OrdinalIgnoreCase);
             }
-            if (autoVoices)
-                await VoiceForgeProvisioning.EnsureAsync(book, libraryPath, verifiedVoiceLibrary, requiredSpeakers, chapterId,
-                    Path.Combine(voiceForge, "provision.py"), voiceForgeImage, workerImage, whisper, ollamaUrl, model);
+            await VoiceForgeProvisioning.EnsureAsync(book, libraryPath, verifiedVoiceLibrary, requiredSpeakers, chapterId,
+                Path.Combine(voiceForge, "generate_candidate.py"), voiceForgeImage, workerImage, whisper, ollamaUrl, model, autoVoices);
             if (chapterId is not null)
             {
                 usage = await VoiceUsageContext.LoadAsync(book, chapterId,

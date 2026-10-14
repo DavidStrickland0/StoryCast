@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <InternalsVisibleTo Include="StoryCast.Infrastructure.Tests" />
     <ProjectReference Include="..\StoryCast.Application\StoryCast.Application.csproj" />
     <ProjectReference Include="..\StoryCast.Infrastructure\StoryCast.Infrastructure.csproj" />
     <ProjectReference Include="..\StoryCast.Ollama\StoryCast.Ollama.csproj" />

@@ -25,6 +25,7 @@ from pronunciations import (
 )
 from spoken_text import normalize_spoken_text, has_spoken_content
 from prepare_audio_text import load_prepared
+from context_pronunciations import load_context_plan, render_units, context_fingerprint, speech_base
 from synthesis_chunking import ends_at_sentence_boundary, split_synthesis_text, parse_chunk_selector
 from synthesis_chunking import MAX_SYNTHESIS_CHARACTERS, split_chat_message
 
@@ -385,6 +386,8 @@ def main(
         raise ValueError(f"Invalid empty dialogue segments {invalid_dialogue}; regenerate dialogue attribution before synthesis.")
     prepared = load_prepared(book, args.chapter, artifact)
     segments = [dict(segment, spokenText=prepared.get(segment["index"], segment.get("spokenText", segment["sourceText"]))) for segment in segments]
+    context_plans = load_context_plan(book, args.chapter)
+    segments = [dict(segment, contextPronunciations=context_plans.get(str(segment["index"]), {})) for segment in segments]
 
     if not segments:
         raise RuntimeError(
@@ -608,6 +611,7 @@ def main(
 
             reusable = (
                 existing is not None and
+                existing.get("contextPronunciationFingerprint", "") == context_fingerprint(segment.get("contextPronunciations")) and
                 voice_id is not None and
                 existing.get("kind") ==
                     segment["kind"] and
@@ -791,6 +795,8 @@ def main(
         )
         previous_segment = next((item for item in manifest["segments"] if item["index"] == segment_index), None)
         synthesis_units = apply_chunk_speech_overrides(synthesis_units, previous_segment)
+        contextual_plan = segment.get("contextPronunciations", {})
+        contextual_units = render_units(synthesis_units, contextual_plan, speech_base(spoken_text, pronunciations), include_decisions=True)
 
         output_path = (
             chapter_directory /
@@ -830,6 +836,7 @@ def main(
         }
 
         resume_context_matches = bool(is_resume and existing_segment and
+            existing_segment.get("contextPronunciationFingerprint", "") == context_fingerprint(contextual_plan) and
             existing_segment.get("kind") == segment["kind"] and
             existing_segment.get("speakerId") == speaker_id and
             existing_segment.get("voiceId") == voice_id and
@@ -840,6 +847,8 @@ def main(
         regenerate_chunks = {}
         for chunk_index, (text, pause) in enumerate(synthesis_units):
             regenerate = not selected_chunks or segment_index in whole_segment_indexes or (segment_index, chunk_index) in selected_chunks
+            if existing_segment and existing_segment.get("contextPronunciationFingerprint", "") != context_fingerprint(contextual_plan):
+                regenerate = True
             if resume_context_matches:
                 regenerate = not resume_chunk_is_reusable(existing_chunks.get(chunk_index), text, pause,
                     chapter_directory / f"segment-{segment_index:04d}-chunk-{chunk_index:04d}.wav")
@@ -890,7 +899,7 @@ def main(
             else:
                 synthesis_text = normalize_spoken_text(
                     apply_pronunciations(
-                        chunk_text,
+                        contextual_units[chunk_index][0],
                         pronunciations,
                     )
                 )
@@ -939,6 +948,7 @@ def main(
                     "index": chunk_index,
                     "sourceText": chunk_text,
                     "synthesisText": synthesis_text,
+                    "contextPronunciations": contextual_units[chunk_index][1],
                     "pauseAfterSeconds": pause_after_seconds,
                     "seed": chunk_seed,
                     "attempt": args.attempt,
@@ -1001,6 +1011,8 @@ def main(
                 "voiceId": voice_id,
                 "synthesis": synthesis_settings,
                 "sourceText": source_text,
+                "contextPronunciations": contextual_plan,
+                "contextPronunciationFingerprint": context_fingerprint(contextual_plan),
             "spokenText": spoken_text,
             "fragmentRewrites": segment.get("fragmentRewrites", []),
             "fragmentRewriteFailures": segment.get("fragmentRewriteFailures", []),

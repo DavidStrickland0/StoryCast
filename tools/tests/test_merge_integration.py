@@ -39,13 +39,17 @@ class MergeVerificationTests(unittest.TestCase):
                  patch.object(verification, "find_book_root", return_value=root), \
                  patch.object(verification, "load_pronunciations", return_value=[]), \
                  patch.object(verification, "verify_audio", return_value=result) as verify:
-                self.assertEqual(2, verification.main())
+                # Rewritten speech retains an audit flag; a matching transcript
+                # passes just as it does in full-chapter verification.
+                self.assertEqual(0, verification.main())
             verify.assert_called_once()
             report = json.loads((root / "verification.json").read_text())
             self.assertEqual(old_chunk, report["chunks"][0])
-            self.assertEqual("review", report["chunks"][1]["status"])
+            self.assertEqual("pass", report["chunks"][1]["status"])
             self.assertTrue(report["segments"][1]["wasRewritten"])
-            self.assertEqual({"total": 2, "passed": 1, "review": 1, "failed": 0}, report["summary"])
+            self.assertEqual("Hello", report["segments"][1]["sourceText"])
+            self.assertEqual("Hello there", report["segments"][1]["expectedText"])
+            self.assertEqual({"total": 2, "passed": 2, "review": 0, "failed": 0}, report["summary"])
 
 
 if __name__ == "__main__":

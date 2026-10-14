@@ -12,6 +12,10 @@ from spoken_text import currency_amounts, normalize_spoken_text
 
 
 class SpokenTextTests(unittest.TestCase):
+    def test_curly_apostrophes_preserve_contractions_and_possessives(self):
+        self.assertEqual("Maren's sure she won't leave 'em behind.",
+                         normalize_spoken_text("Maren’s sure she won’t leave ‘em behind."))
+
     def test_expands_complete_currency_before_generic_numbers(self) -> None:
         self.assertEqual(
             "He owed two thousand four hundred eighty-seven dollars and sixty-three cents.",
