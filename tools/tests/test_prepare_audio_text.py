@@ -12,6 +12,15 @@ import prepare_audio_text as preparation
 
 
 class AudioPreparationTests(unittest.TestCase):
+    def test_accepts_abbreviation_and_roman_expansions_without_losing_identity(self):
+        source = "The OS describes World War I and World War II."
+        spoken = "The O S describes World War one and World War two."
+        self.assertEqual(spoken, preparation.safe_text(source))
+        self.assertEqual(spoken, preparation.validate_replacement(source, spoken))
+        for changed in (spoken.replace("one", "two"), spoken.replace("O S", "is")):
+            with self.assertRaises(ValueError):
+                preparation.validate_replacement(source, changed)
+
     def test_cannot_invent_dialogue_from_quoted_blank_lines(self):
         with self.assertRaisesRegex(ValueError, "empty source"):
             preparation.validate_replacement('"\n\n"', "I will tell you.")

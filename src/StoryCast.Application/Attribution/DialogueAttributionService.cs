@@ -34,6 +34,22 @@ public sealed class DialogueAttributionService
         listener, not the speaker. Do not assign every untagged reply to the
         last explicitly tagged speaker.
 
+        A single newline is enough to separate dialogue turns; blank lines are
+        not required. Standalone quoted lines in a two-person exchange normally
+        alternate speakers. For example:
+        I said "Hello"
+        "Hello"
+        "How are You"
+        "I am fine"
+        Assign these turns to I, the other participant, I, the other participant.
+        The first line's "I said" does not apply to subsequent quoted lines.
+        Use the registry to identify the other participant; if their identity
+        is unclear, lower confidence instead of assigning every line to I.
+        Multiple quotations on one physical line separated by action beats
+        may continue the same speaker. Wrapped prose or a clearly continuing
+        monologue can override the turn pattern; a newline inside one open
+        quotation is not a new speaker turn.
+
         A dialogue tag after a quotation identifies that preceding quotation,
         not the next paragraph's reply. Keep tags within their source paragraph.
         For example, '"Leave?" Adam asked.\n\n"Why?"' does not tag "Why?"
@@ -46,8 +62,12 @@ public sealed class DialogueAttributionService
         belong to one speaker, and a continuing speech, interruption, third
         participant, or scene change can break the pattern. Use the text as
         evidence and lower confidence when the participants remain ambiguous.
-        Earlier batch assignments are continuity context, not proof; prefer
-        explicit textual evidence if it contradicts an earlier assignment.
+        Determine each speaker afresh from the source text. A previous speaker
+        is not a default for the next quote. When the narrator approaches a
+        different person, someone enters or leaves, or a new conversation
+        begins, reestablish the participants before assigning any replies.
+        Read the narration between turns and evidence on both sides of a quote;
+        a later introduction can identify an earlier untagged reply.
 
         Confidence must reflect the evidence:
         - 0.95 to 1.00: directly identified by a dialogue tag.
@@ -62,6 +82,14 @@ public sealed class DialogueAttributionService
         Quoted messages displayed by a system, textbox, or chat interface belong
         to the established interface speaker. A comparison such as "like a
         guardian angel" does not identify a mother or introduce a new speaker.
+
+        Before returning each assignment, verify that speakerId belongs to the
+        character identified as speaking in the rationale. Do not select the
+        listener's ID or carry an earlier speaker into a new introduction.
+        For example, a rationale saying "Continuation of Tim's response" must
+        use Tim's registry ID, never Luna's. Keep quotes separated by an action
+        beat in the same speech assigned to that speaker unless the text
+        explicitly introduces another speaker.
 
         Rationale must briefly identify the evidence used. Return only JSON
         matching the supplied schema.
@@ -156,9 +184,9 @@ public sealed class DialogueAttributionService
                 SerializerOptions)}
             """;
 
-        var batches = dialogueSegments.Chunk(MaximumBatchSize).ToArray();
         var characterIds = registry.Characters.Select(character => character.Id).ToArray();
         var paragraphs = dialogueSegments.ToDictionary(segment => segment.Index, segment => SourceParagraph(script.SourceText, segment.SourceStart));
+        var batches = CreateBatches(dialogueSegments, script.SourceText);
         var assignments = new List<DialogueAssignment>(dialogueSegments.Length);
         for (var batchIndex = 0; batchIndex < batches.Length; batchIndex++)
         {
@@ -174,8 +202,14 @@ public sealed class DialogueAttributionService
                 here belong to their own paragraph, not the next turn):
                 {JsonSerializer.Serialize(batches[batchIndex].Select(segment => new { segment.Index, Paragraph = paragraphs[segment.Index] }), SerializerOptions)}
 
-                Earlier batch assignments (speaker continuity context):
-                {JsonSerializer.Serialize(assignments.OrderBy(assignment => assignment.SegmentIndex), SerializerOptions)}
+                Physical source lines for requested quotes (preserve single-newline
+                turn boundaries even when several turns share one paragraph):
+                {JsonSerializer.Serialize(batches[batchIndex].Select(segment => new
+                {
+                    segment.Index,
+                    Line = SourceLine(script.SourceText, segment.SourceStart),
+                    BeginsQuotedLine = BeginsQuotedLine(script.SourceText, segment.SourceStart)
+                }), SerializerOptions)}
 
                 Return exactly {indexes.Length} assignments. The full ordered chapter above
                 is context for speaker identity and conversational continuity. Do not
@@ -183,18 +217,69 @@ public sealed class DialogueAttributionService
                 """;
             var label = $"Chapter {script.ChapterId}, batch {batchIndex + 1} of {batches.Length}";
             assignments.AddRange(await AttributeBatchAsync(
-                batchPrompt, indexes, characterIds, paragraphs, label, cancellationToken));
+                batchPrompt, indexes, characterIds, registry.Characters, paragraphs, label, cancellationToken));
             Console.WriteLine($"Dialogue attribution: {label} complete ({assignments.Count}/{dialogueSegments.Length} lines).");
         }
 
         return assignments.OrderBy(assignment => assignment.SegmentIndex).ToArray();
     }
 
-    private static string SourceParagraph(string text, int offset)
+    private static ProductionSegment[][] CreateBatches(
+        ProductionSegment[] dialogueSegments,
+        string sourceText)
+    {
+        var batches = new List<ProductionSegment[]>();
+        var pending = new List<ProductionSegment>();
+        // Keep an introduction or a speech interrupted by action beats in one
+        // request where possible. Use offsets, not paragraph text: repeated
+        // identical replies in different paragraphs are distinct turns.
+        foreach (var paragraph in dialogueSegments.GroupBy(segment =>
+                     ParagraphStart(sourceText, segment.SourceStart)))
+        {
+            foreach (var chunk in paragraph.Chunk(MaximumBatchSize))
+            {
+                if (pending.Count + chunk.Length > MaximumBatchSize)
+                {
+                    batches.Add(pending.ToArray());
+                    pending.Clear();
+                }
+
+                pending.AddRange(chunk);
+            }
+        }
+
+        if (pending.Count > 0)
+        {
+            batches.Add(pending.ToArray());
+        }
+
+        return batches.ToArray();
+    }
+
+    private static int ParagraphStart(string text, int offset)
     {
         var position = Math.Clamp(offset, 0, Math.Max(0, text.Length - 1));
         var previous = text.LastIndexOf("\n\n", position, StringComparison.Ordinal);
-        var start = previous < 0 ? 0 : previous + 2;
+        return previous < 0 ? 0 : previous + 2;
+    }
+
+    private static string SourceLine(string text, int offset)
+    {
+        var previous = offset == 0 ? -1 : text.LastIndexOf('\n', offset - 1);
+        var next = text.IndexOf('\n', offset);
+        return text[(previous + 1)..(next < 0 ? text.Length : next)].TrimEnd('\r');
+    }
+
+    private static bool BeginsQuotedLine(string text, int offset)
+    {
+        var previous = offset == 0 ? -1 : text.LastIndexOf('\n', offset - 1);
+        return string.IsNullOrWhiteSpace(text[(previous + 1)..offset]);
+    }
+
+    private static string SourceParagraph(string text, int offset)
+    {
+        var position = Math.Clamp(offset, 0, Math.Max(0, text.Length - 1));
+        var start = ParagraphStart(text, offset);
         var next = text.IndexOf("\n\n", position, StringComparison.Ordinal);
         var end = next < 0 ? text.Length : next;
         return text[start..end];
@@ -204,6 +289,7 @@ public sealed class DialogueAttributionService
         string userPrompt,
         IReadOnlyList<int> indexes,
         IReadOnlyList<string> characterIds,
+        IReadOnlyList<CharacterProfile> characters,
         IReadOnlyDictionary<int, string> paragraphs,
         string label,
         CancellationToken cancellationToken)
@@ -232,6 +318,7 @@ public sealed class DialogueAttributionService
                 var validated = ValidateBatch(response, indexes, characterIds);
                 foreach (var assignment in validated)
                 {
+                    ValidateSpeakerEvidence(assignment, characters);
                     var citation = Regex.Match(assignment.Rationale, "dialogue tag\\s+['\"](?<tag>[^'\"]+)['\"]", RegexOptions.IgnoreCase);
                     var claimsDirectTag = assignment.Confidence >= 0.95m || Regex.IsMatch(assignment.Rationale, "\\b(?:directly|explicitly|explicit|direct)\\b", RegexOptions.IgnoreCase);
                     var citedText = citation.Groups["tag"].Value.TrimEnd('.', '\u2026').Trim();
@@ -265,6 +352,37 @@ public sealed class DialogueAttributionService
             $"Dialogue attribution remained invalid after {MaximumAttempts} attempts " +
             $"for {label}, indexes {string.Join(", ", indexes)}. Final failure: {finalFailure?.Message}",
             finalFailure);
+    }
+
+    private static void ValidateSpeakerEvidence(
+        DialogueAssignment assignment,
+        IReadOnlyList<CharacterProfile> characters)
+    {
+        // Only inspect explicit speaker claims. Merely mentioning a listener,
+        // or quoting an earlier turn's tag, is not a speaker identification.
+        var names = characters.SelectMany(character => character.Aliases
+                .Append(character.DisplayName)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => new { Name = name.Trim(), character.Id }))
+            .GroupBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase);
+        foreach (var group in names)
+        {
+            var ids = group.Select(entry => entry.Id).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (ids.Length != 1 || ids[0].Equals(assignment.SpeakerId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var name = Regex.Escape(group.Key);
+            var pattern = $@"(?:^|[.!?]\s+)(?:(?:Continuation of\s+){name}['’]s\s+(?:response|reply|statement|speech|explanation|dialogue)\b|(?:The\s+)?speaker is\s+{name}(?=\s|[.,;:]|$)|Dialogue (?:belongs to|is attributed to|is assigned to)\s+{name}(?=\s|[.,;:]|$)|{name}\s+(?:is identified\b|introduces (?:himself|herself|themselves)\b|says\b|speaks\b|asks\b|replies\b|answers\b)|Narration describes\s+{name}\s+speaking\b)";
+            if (Regex.IsMatch(assignment.Rationale, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            {
+                throw new InvalidDataException(
+                    $"Segment {assignment.SegmentIndex} assigns speakerId '{assignment.SpeakerId}' " +
+                    $"but its rationale identifies '{group.Key}' (registry ID '{ids[0]}') as the speaker. " +
+                    "Reconsider this turn and return a speakerId and rationale that agree with the source evidence.");
+            }
+        }
     }
 
     private static IReadOnlyList<DialogueAssignment> ValidateBatch(
