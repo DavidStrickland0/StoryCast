@@ -9,7 +9,7 @@ from pathlib import Path
 
 from book_manifest import resolve_book_manifest
 
-DEFAULT_BITRATE = "128k"
+DEFAULT_BITRATE = "64k"
 CHAPTER_END_PADDING_SECONDS = 1.0
 
 
@@ -333,6 +333,8 @@ def main() -> int:
             f"apad=pad_dur={CHAPTER_END_PADDING_SECONDS}",
             "-b:a",
             args.bitrate,
+            "-ac",
+            "1",
             "-id3v2_version",
             "3",
             "-write_id3v1",
@@ -378,6 +380,7 @@ def main() -> int:
         "language": metadata["language"],
         "publicationYear": publication_year,
         "bitrate": args.bitrate,
+        "channels": 1,
         "endPaddingSeconds": CHAPTER_END_PADDING_SECONDS,
         "coverPath": (
             str(cover_path)

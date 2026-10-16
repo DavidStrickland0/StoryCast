@@ -10,6 +10,7 @@ import torch
 import torchaudio
 
 from prosody import resolve_segment_synthesis_settings
+from delivery_planning import load_delivery, reference_settings
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
 
@@ -24,6 +25,7 @@ def resolve_synthesis_settings(
     speaker_id: str,
     source_text: str,
     delivery: str = "",
+    performance: dict | None = None,
 ) -> dict[str, float | str]:
     """Resolve prose-aware settings from the casting baseline."""
     return resolve_segment_synthesis_settings(
@@ -31,6 +33,7 @@ def resolve_synthesis_settings(
         speaker_id,
         source_text,
         delivery,
+        performance,
     )
 
 
@@ -150,6 +153,7 @@ def main() -> int:
         )
 
     segment = matching_segments[0]
+    performance = load_delivery(book, args.chapter, artifact["script"]["segments"]).get(segment["index"])
     speaker_id = segment["speakerId"]
 
     matching_assignments = [
@@ -173,12 +177,14 @@ def main() -> int:
         speaker_id,
         segment["sourceText"],
         segment.get("delivery", ""),
+        performance,
     )
 
     voice_sample = find_voice_sample(
         library,
         voice_id,
     )
+    voice_sample, synthesis_settings = reference_settings(synthesis_settings, voice_sample, voice_id, segment.get("delivery", ""))
 
     run_directory = create_run_directory(book)
 

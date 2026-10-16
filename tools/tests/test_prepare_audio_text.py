@@ -12,6 +12,16 @@ import prepare_audio_text as preparation
 
 
 class AudioPreparationTests(unittest.TestCase):
+    def test_context_plan_uses_saved_resume_speech_without_changing_preparation(self):
+        prepared = [{"index": 1, "sourceText": "Read!", "spokenText": "Read!"},
+                    {"index": 2, "sourceText": "Stay.", "spokenText": "Stay."}]
+        checkpoint = [{"index": 1, "sourceText": "Read!", "spokenText": "Read it now!"},
+                      {"index": 2, "sourceText": "Different source", "spokenText": "Wrong rewrite"}]
+        effective = preparation.contextual_segments(prepared, checkpoint)
+        self.assertEqual("Read it now!", effective[0]["spokenText"])
+        self.assertEqual("Read!", prepared[0]["spokenText"])
+        self.assertEqual("Stay.", effective[1]["spokenText"])
+
     def test_accepts_abbreviation_and_roman_expansions_without_losing_identity(self):
         source = "The OS describes World War I and World War II."
         spoken = "The O S describes World War one and World War two."

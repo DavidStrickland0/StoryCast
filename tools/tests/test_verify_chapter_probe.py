@@ -39,6 +39,8 @@ class RewrittenVerificationTests(unittest.TestCase):
                 manifest.write_text(json.dumps({'chapterId': 'chapter-003', 'segments': [{
                     'index': 22, 'speakerId': 'elias', 'voiceId': 'voice',
                     'sourceText': 'Run!', 'spokenText': 'Run now!',
+                    'delivery': 'screaming through tears',
+                    'synthesis': {'deliveryDirection': 'screaming through tears', 'profile': 'free-form'},
                     'audioPath': str(root / 'segment.wav'),
                 }]}))
                 result = {'status': status, 'verificationMode': 'transcript',

@@ -81,8 +81,22 @@ def load_prepared(book, chapter, artifact):
     return replacements
 
 
-def prepare_chapter(book, chapter, model, ollama_url):
+def contextual_segments(segments, checkpoint_segments=None):
+    """Plan the same saved speech rewrites that resume synthesis will use."""
+    checkpoints = {item["index"]: item for item in checkpoint_segments or []}
+    result = []
+    for segment in segments:
+        previous = checkpoints.get(segment["index"], {})
+        if previous.get("sourceText") == segment["sourceText"] and "spokenText" in previous:
+            segment = dict(segment, spokenText=previous["spokenText"])
+        result.append(segment)
+    return result
+
+
+def prepare_chapter(book, chapter, model, ollama_url, checkpoint_segments=None):
     artifact = json.loads((Path(book) / "production" / "scripts" / f"{chapter}.json").read_text(encoding="utf-8-sig"))
+    from delivery_planning import prepare_delivery
+    prepare_delivery(book, chapter, artifact["script"]["segments"], model, ollama_url)
     from chat_pronunciations import prepare_chat_pronunciations
     prepare_chat_pronunciations(Path(book), artifact["script"]["segments"], model, ollama_url)
     path = preparation_path(book, chapter)
@@ -92,7 +106,7 @@ def prepare_chapter(book, chapter, model, ollama_url):
         if saved.get("version") == VERSION and saved.get("scriptSha256") == fingerprint and saved.get("model") == model:
             load_prepared(book, chapter, artifact)
             from context_pronunciations import prepare_context_pronunciations
-            prepare_context_pronunciations(book, chapter, saved["segments"], model, ollama_url)
+            prepare_context_pronunciations(book, chapter, contextual_segments(saved["segments"], checkpoint_segments), model, ollama_url)
             print(f"Using existing audio preparation: {path}", flush=True)
             return path
     segments = artifact["script"]["segments"]
@@ -177,7 +191,7 @@ def prepare_chapter(book, chapter, model, ollama_url):
     temporary.replace(path)
     load_prepared(book, chapter, artifact)
     from context_pronunciations import prepare_context_pronunciations
-    prepare_context_pronunciations(book, chapter, prepared, model, ollama_url)
+    prepare_context_pronunciations(book, chapter, contextual_segments(prepared, checkpoint_segments), model, ollama_url)
     print(f"Audio preparation saved: {path} ({report['changedSegments']} changed segments)", flush=True)
     return path
 

@@ -70,7 +70,8 @@ def classify_delivery(
     delivery: str = "",
 ) -> str:
     """Classify prose and delivery instructions into a prosody profile."""
-    combined = f"{delivery} {source_text}".casefold()
+    # Spoken words are content, not acting directions ("don't scream" is not a scream).
+    combined = delivery.casefold()
 
     if contains_any(
         combined,
@@ -184,6 +185,7 @@ def resolve_segment_synthesis_settings(
     speaker_id: str,
     source_text: str,
     delivery: str = "",
+    performance: dict | None = None,
 ) -> dict[str, float | str]:
     """Resolve final synthesis settings from casting and segment prose."""
     configured = assignment.get("synthesis") or {}
@@ -221,8 +223,18 @@ def resolve_segment_synthesis_settings(
     )
 
     adjustments = PROFILE_ADJUSTMENTS[profile]
+    if performance is not None:
+        from delivery_planning import validate_plan
+        if performance.get("direction") != delivery.strip():
+            raise ValueError("Performance direction does not match the current segment.")
+        validate_plan(performance["adjustments"], delivery.strip())
+        adjustments = performance["adjustments"]
+        profile = "free-form"
     resolved: dict[str, float | str] = {
         "profile": profile,
+        "deliveryDirection": delivery.strip(),
+        "deliveryCapability": "approximate-parameters",
+        "deliveryVersion": 1,
     }
 
     for name, baseline_value in baseline.items():

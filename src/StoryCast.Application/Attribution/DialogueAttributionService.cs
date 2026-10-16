@@ -75,9 +75,18 @@ public sealed class DialogueAttributionService
         - 0.60 to 0.79: probable but not explicit.
         - Below 0.60: materially ambiguous.
 
-        Delivery must be a short audible direction such as calm, strained,
-        dry, angry, hesitant, or controlled. Do not invent extreme emotion
-        unsupported by the text.
+        Delivery is a free-form audible acting direction, not a fixed category.
+        Use the nearby speech tags and surrounding scene to describe how THIS
+        speaker delivers THIS line: for example whispering, yelling joyfully,
+        screaming in fear, quietly, thoughtfully, sarcastically, through tears,
+        breathlessly, or barely containing excitement. Other directions and
+        combinations are equally valid. Keep it concise (at most 80 characters).
+        Distinguish emotion from volume: anger can be quiet; joy can be shouted.
+        A character mentioning a scream or whisper does not mean they perform
+        that action. Do not invent extreme emotion unsupported by the text.
+        Preserve each character's speakerId regardless of delivery; never assign
+        a different speaker to obtain a performance. Directions are metadata,
+        never words to be spoken.
 
         Quoted messages displayed by a system, textbox, or chat interface belong
         to the established interface speaker. A comparison such as "like a

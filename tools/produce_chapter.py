@@ -1577,7 +1577,10 @@ def main() -> int:
 
     try:
         current_stage = "audio text preparation"
-        prepare_chapter(book, args.chapter, args.audio_preparation_model or args.rewrite_model, args.ollama_url)
+        checkpoint = chapter_directory / "chapter.json"
+        checkpoint_segments = load_json(checkpoint).get("segments", []) if is_resume and checkpoint.is_file() else None
+        prepare_chapter(book, args.chapter, args.audio_preparation_model or args.rewrite_model, args.ollama_url,
+                        checkpoint_segments=checkpoint_segments)
         current_stage = "synthesis"
 
         synthesis_worker = PersistentSynthesisWorker(
@@ -1936,7 +1939,8 @@ def main() -> int:
                 "export_chapter.py",
             ],
             {
-                "bitrate": "128k",
+                "bitrate": "64k",
+                "channels": 1,
                 "ambienceEnabled": not args.no_ambience,
             },
             [
@@ -1955,7 +1959,7 @@ def main() -> int:
                     args.chapter,
                     str(export_audio),
                     "--bitrate",
-                    "128k",
+                    "64k",
                 ],
             ),
         )

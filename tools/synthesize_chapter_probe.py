@@ -19,6 +19,7 @@ from audio_postprocessing import polish_audio
 from book_manifest import resolve_book_manifest
 from heading_pauses import load_markdown_headings, split_synthesis_units, CHUNK_PAUSE_SECONDS, HEADING_PAUSE_SECONDS
 from prosody import resolve_segment_synthesis_settings
+from delivery_planning import load_delivery, reference_settings
 from pronunciations import (
     apply_pronunciations,
     load_pronunciations,
@@ -56,6 +57,7 @@ def resolve_synthesis_settings(
     speaker_id: str,
     source_text: str,
     delivery: str = "",
+    performance: dict | None = None,
 ) -> dict[str, float | str]:
     """Resolve prose-aware settings from the casting baseline."""
     return resolve_segment_synthesis_settings(
@@ -63,6 +65,7 @@ def resolve_synthesis_settings(
         speaker_id,
         source_text,
         delivery,
+        performance,
     )
 
 
@@ -294,6 +297,8 @@ def main(
     )
 
     segments = artifact["script"]["segments"]
+    performances = load_delivery(book, args.chapter, segments)
+    segments = [dict(segment, performance=performances.get(segment["index"])) for segment in segments]
     invalid_dialogue = [segment["index"] for segment in segments
                         if segment.get("kind") == "dialogue" and not has_spoken_content(segment["sourceText"])]
     if invalid_dialogue:
@@ -498,6 +503,7 @@ def main(
                     speaker_id,
                     segment["sourceText"],
                     segment.get("delivery", ""),
+                    segment.get("performance"),
                 )
                 if casting_assignment is not None
                 else None
@@ -505,6 +511,8 @@ def main(
             existing = existing_by_index.get(
                 segment_index
             )
+            if synthesis_settings is not None and voice_id.lower() in voice_samples:
+                _, synthesis_settings = reference_settings(synthesis_settings, voice_samples[voice_id.lower()], voice_id, segment.get("delivery", ""))
             expected_audio_path = (
                 chapter_directory /
                 f"segment-{segment_index:04d}.wav"
@@ -680,6 +688,7 @@ def main(
                     speaker_id,
                     segment["sourceText"],
                     segment.get("delivery", ""),
+                    segment.get("performance"),
                 )
 
         voice_sample = voice_samples.get(
@@ -691,6 +700,11 @@ def main(
                 f"Voice sample was not found for "
                 f"voice '{voice_id}'."
             )
+
+        voice_sample, synthesis_settings = reference_settings(
+            synthesis_settings, voice_sample, voice_id, segment.get("delivery", ""))
+        if segment.get("delivery"):
+            print(f"Delivery: {segment['delivery']} | {synthesis_settings['referenceMode']} | parameter approximation", flush=True)
 
         seed = (
             10000 +
@@ -762,6 +776,9 @@ def main(
         for chunk_index, (text, pause) in enumerate(synthesis_units):
             regenerate = not selected_chunks or segment_index in whole_segment_indexes or (segment_index, chunk_index) in selected_chunks
             if existing_segment and existing_segment.get("contextPronunciationFingerprint", "") != context_fingerprint(contextual_plan):
+                regenerate = True
+            if existing_segment and existing_segment.get("synthesis") != synthesis_settings:
+                # Delivery/reference changes invalidate every chunk, including selective retries.
                 regenerate = True
             if resume_context_matches:
                 regenerate = not resume_chunk_is_reusable(existing_chunks.get(chunk_index), text, pause,
