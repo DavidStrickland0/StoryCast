@@ -105,11 +105,15 @@ internal static class DialogueCommands
                 contextLength: 32768,
                 maximumOutputTokens: 4096);
 
+            var conventions = AudioGenerationSettings.DialogueConventions(bookPath);
             var workflow =
                 new DialogueAttributionWorkflow(
                     new ChapterTextPreparer(),
-                    new ProductionScriptSegmenter(),
-                    new DialogueAttributionService(generator, allowReview),
+                    new ProductionScriptSegmenter(
+                        AudioGenerationSettings.String(bookPath, "squareBracketSpeakerId") is not null ||
+                        string.Equals(AudioGenerationSettings.String(bookPath, "squareBracketDialogue"), "true", StringComparison.OrdinalIgnoreCase), conventions),
+                    new DialogueAttributionService(generator, allowReview,
+                        AudioGenerationSettings.String(bookPath, "squareBracketSpeakerId"), conventions),
                     new DialogueAttributionApplicator(),
                     new FileSystemCharacterRegistryStore(),
                     new FileSystemProductionScriptStore());

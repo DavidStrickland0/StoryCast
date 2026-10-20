@@ -25,6 +25,15 @@ public sealed class DialogueAttributionService
         Use dialogue tags, nearby narration, conversational order, names,
         aliases, pronouns, roles, and preceding exchanges as evidence.
 
+        Dialogue may be delimited by [square brackets] for AI, system, or
+        android voices. These are speech turns when supplied as dialogue.
+        Use surrounding context to assign the established entity's registry ID,
+        not the human narrator or the previous human speaker. Do not create a
+        different identity merely because the entity speaks through an android.
+        Distinct systems and androids can still be different speakers. Bracketed
+        chapter subtitles or editorial notes should receive the narrator ID
+        with a rationale explaining that they are not character speech.
+
         Untagged dialogue is often a back-and-forth exchange. Read the entire
         exchange before assigning its turns. In an established two-person
         conversation, successive quoted paragraphs normally alternate speakers
@@ -112,6 +121,8 @@ public sealed class DialogueAttributionService
 
     private readonly IStructuredTextGenerator generator;
     private readonly bool allowReview;
+    private readonly string? squareBracketSpeakerId;
+    private readonly IReadOnlyList<DialogueConvention> conventions;
 
     /// <summary>
     /// Initializes a dialogue-attribution service.
@@ -120,14 +131,20 @@ public sealed class DialogueAttributionService
     /// The schema-constrained text generator.
     /// </param>
     /// <param name="allowReview">Produces provisional assignments for review after invalid model responses exhaust retries.</param>
+    /// <param name="squareBracketSpeakerId">Optional book rule assigning all bracketed dialogue to this registry identity.</param>
+    /// <param name="conventions">Book-specific delimiter and speaker rules, applied before model inference.</param>
     public DialogueAttributionService(
         IStructuredTextGenerator generator,
-        bool allowReview = false)
+        bool allowReview = false,
+        string? squareBracketSpeakerId = null,
+        IReadOnlyList<DialogueConvention>? conventions = null)
     {
         this.generator =
             generator ??
             throw new ArgumentNullException(nameof(generator));
         this.allowReview = allowReview;
+        this.squareBracketSpeakerId = squareBracketSpeakerId;
+        this.conventions = conventions ?? [];
     }
 
     /// <inheritdoc />
@@ -140,13 +157,81 @@ public sealed class DialogueAttributionService
         ArgumentNullException.ThrowIfNull(registry);
         cancellationToken.ThrowIfCancellationRequested();
 
+        var fixedRules = conventions.Where(rule => rule.SpeakerId is not null).ToList();
+        if (squareBracketSpeakerId is not null && !fixedRules.Any(rule => rule.Open == '['))
+            fixedRules.Add(new DialogueConvention { Open = '[', Close = ']', SpeakerId = squareBracketSpeakerId });
+        foreach (var rule in fixedRules)
+        {
+            if (!registry.Characters.Any(character => character.Id.Equals(rule.SpeakerId, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidDataException($"Configured dialogue speaker '{rule.SpeakerId}' is not in the character registry.");
+            foreach (var mapping in rule.SpeakerIdsByLabel)
+                if (!registry.Characters.Any(character => character.Id.Equals(mapping.Value, StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidDataException($"Configured speaker label '{mapping.Key}' maps to unknown character '{mapping.Value}'.");
+        }
+        DialogueConvention? FixedRule(ProductionSegment segment)
+        {
+            var value = segment.SourceText.Trim();
+            return fixedRules.FirstOrDefault(rule => value.StartsWith(rule.Open) && value.EndsWith(rule.Close));
+        }
+
+        string FixedSpeaker(ProductionSegment segment)
+        {
+            var rule = FixedRule(segment)!;
+            var defaultSpeaker = registry.Characters.Single(character => character.Id.Equals(rule.SpeakerId, StringComparison.OrdinalIgnoreCase)).Id;
+            if (!rule.SpeakerLabelsOverride) return defaultSpeaker;
+            var content = segment.SourceText.Trim()[1..^1];
+            var label = Regex.Match(content, @"^\s*(?<label>[^:\r\n]{1,150}):\s*");
+            if (!label.Success) return defaultSpeaker;
+            var fullName = label.Groups["label"].Value.Trim();
+            var name = Regex.Replace(fullName, @"\s*\([^()]*\)\s*$", "").Trim();
+            var mapped = rule.SpeakerIdsByLabel.FirstOrDefault(entry => entry.Key.Equals(fullName, StringComparison.OrdinalIgnoreCase));
+            if (mapped.Key is null)
+                mapped = rule.SpeakerIdsByLabel.FirstOrDefault(entry => entry.Key.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (mapped.Key is not null)
+                return registry.Characters.Single(character => character.Id.Equals(mapped.Value, StringComparison.OrdinalIgnoreCase)).Id;
+            bool Matches(CharacterProfile character) => character.Id.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                character.DisplayName.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                character.Aliases.Any(alias => alias.Equals(name, StringComparison.OrdinalIgnoreCase));
+            var candidates = registry.Characters.Where(Matches).ToArray();
+            // A colon alone can introduce a system field, e.g. "Genetic match
+            // score: 53%". A name in the registry or an explicit origin label
+            // establishes a named participant in this book's convention.
+            if (candidates.Length == 0 && name == fullName) return defaultSpeaker;
+            if (candidates.Length > 1)
+            {
+                var local = candidates.Where(character => character.Id.StartsWith(script.ChapterId + "-", StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (local.Length == 1) candidates = local;
+            }
+            if (candidates.Length != 1)
+                throw new InvalidDataException($"Bracketed speaker label '{fullName}' has {candidates.Length} matching registry identities. Resolve character discovery for this named speaker; it cannot use the default android voice.");
+            return candidates[0].Id;
+        }
+
+        if (squareBracketSpeakerId is not null && !registry.Characters.Any(character =>
+                character.Id.Equals(squareBracketSpeakerId, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidDataException($"Configured squareBracketSpeakerId '{squareBracketSpeakerId}' is not in the character registry.");
+        }
+
+        var fixedAssignments = script.Segments
+            .Where(segment => segment.Kind == SegmentKind.Dialogue && FixedRule(segment) is not null)
+            .Select(segment => new DialogueAssignment
+            {
+                SegmentIndex = segment.Index,
+                SpeakerId = FixedSpeaker(segment),
+                Confidence = 1m,
+                Delivery = "",
+                Rationale = "Assigned by the book's explicit dialogue convention."
+            }).ToArray();
+        var fixedIndexes = fixedAssignments.Select(assignment => assignment.SegmentIndex).ToHashSet();
         var dialogueSegments = script.Segments
             .Where(segment => segment.Kind == SegmentKind.Dialogue)
+            .Where(segment => !fixedIndexes.Contains(segment.Index))
             .ToArray();
 
         if (dialogueSegments.Length == 0)
         {
-            return [];
+            return fixedAssignments;
         }
 
         if (registry.Characters.Count == 0)
@@ -196,7 +281,7 @@ public sealed class DialogueAttributionService
         var characterIds = registry.Characters.Select(character => character.Id).ToArray();
         var paragraphs = dialogueSegments.ToDictionary(segment => segment.Index, segment => SourceParagraph(script.SourceText, segment.SourceStart));
         var batches = CreateBatches(dialogueSegments, script.SourceText);
-        var assignments = new List<DialogueAssignment>(dialogueSegments.Length);
+        var assignments = new List<DialogueAssignment>(fixedAssignments);
         for (var batchIndex = 0; batchIndex < batches.Length; batchIndex++)
         {
             cancellationToken.ThrowIfCancellationRequested();

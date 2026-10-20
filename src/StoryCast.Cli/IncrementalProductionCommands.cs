@@ -47,9 +47,13 @@ internal static class IncrementalProductionCommands
             var model =
                 GetOptionValue(args, "--model") ??
                 Environment.GetEnvironmentVariable(
-                    "STORYCAST_OLLAMA_MODEL") ??
-                throw new ArgumentException(
-                    "Specify --model or set STORYCAST_OLLAMA_MODEL.");
+                    "STORYCAST_OLLAMA_MODEL");
+            string StageModel(string option, string setting) =>
+                GetOptionValue(args, option) ?? AudioGenerationSettings.String(bookPath, setting) ?? model ??
+                throw new ArgumentException($"Specify {option}, --model, or STORYCAST_OLLAMA_MODEL.");
+            var discoveryModel = StageModel("--discovery-model", "discoveryModel");
+            var attributionModel = StageModel("--attribution-model", "attributionModel");
+            var castingModel = StageModel("--casting-model", "castingModel");
 
             var libraryPath = Path.GetFullPath(
                 GetOptionValue(args, "--library") ??
@@ -127,7 +131,9 @@ internal static class IncrementalProductionCommands
             Console.WriteLine(
                 $"Chapters:      {book.Manuscript.Chapters.Count}");
             Console.WriteLine($"Voice library: {libraryPath}");
-            Console.WriteLine($"Model:         {model}");
+            Console.WriteLine($"Discovery:     {discoveryModel}");
+            Console.WriteLine($"Attribution:   {attributionModel}");
+            Console.WriteLine($"Casting:       {castingModel}");
             Console.WriteLine($"Whisper:       {whisperModel}");
             Console.WriteLine($"Worker image:  {workerImage}");
             Console.WriteLine($"State:         {statePath}");
@@ -156,7 +162,7 @@ internal static class IncrementalProductionCommands
             var resumeRun =
                 entry is not null &&
                 !string.IsNullOrWhiteSpace(entry.RunDirectory) &&
-                Directory.Exists(entry.RunDirectory);
+                CanResumeWorkerRun(entry.RunDirectory);
 
             if (entry is null)
             {
@@ -213,7 +219,7 @@ internal static class IncrementalProductionCommands
                     [
                         bookPath,
                         "--model",
-                        model,
+                        discoveryModel,
                         "--ollama-url",
                         ollamaUrl,
                         "--chapter",
@@ -241,7 +247,7 @@ internal static class IncrementalProductionCommands
                     [
                         bookPath,
                         "--model",
-                        model,
+                        attributionModel,
                         "--ollama-url",
                         ollamaUrl,
                         "--chapter",
@@ -287,7 +293,7 @@ internal static class IncrementalProductionCommands
                     [
                         bookPath,
                         "--model",
-                        model,
+                        castingModel,
                         "--ollama-url",
                         ollamaUrl,
                         "--library",
@@ -339,7 +345,7 @@ internal static class IncrementalProductionCommands
             if (args.Contains("--allow-review", StringComparer.OrdinalIgnoreCase)) productionArguments.Add("--allow-review");
             if (args.Contains("--no-ambience", StringComparer.OrdinalIgnoreCase)) productionArguments.Add("--no-ambience");
             if (args.Contains("--no-auto-voices", StringComparer.OrdinalIgnoreCase)) productionArguments.Add("--no-auto-voices");
-            foreach (var option in new[] { "--soundforge-url", "--ambience-gain-db", "--voiceforge", "--voiceforge-image", "--audio-preparation-model" })
+            foreach (var option in new[] { "--soundforge-url", "--ambience-gain-db", "--voiceforge", "--voiceforge-image", "--audio-preparation-model", "--rewrite-model", "--speech-repair-model" })
             {
                 if (GetOptionValue(args, option) is { } optionValue) productionArguments.AddRange([option, optionValue]);
             }
@@ -505,7 +511,20 @@ internal static class IncrementalProductionCommands
 
             Options:
               --model <model>
-                  Installed Ollama model used for analysis and casting.
+                  Shared Ollama text-model fallback for analysis and casting.
+
+              --discovery-model <model>
+                  Ollama model for character discovery; overrides --model.
+              --attribution-model <model>
+                  Ollama model for dialogue speaker attribution; overrides --model.
+              --casting-model <model>
+                  Ollama model for voice casting; overrides --model.
+              --audio-preparation-model <model>
+                  Ollama model for speech-text preparation; defaults to rewrite model.
+              --speech-repair-model <model>
+                  Ollama model for wording repairs after speech verification fails.
+                  May rephrase spoken text. Default qwen3.8:27b.
+                  --rewrite-model remains a legacy alias.
 
               --ollama-url <url>
                   Ollama endpoint. Defaults to http://localhost:11434/.
@@ -654,6 +673,21 @@ internal static class IncrementalProductionCommands
                             StringComparison.OrdinalIgnoreCase) &&
                         HasCompletedArtifact(chapterState, prepared.ChapterId));
             });
+    }
+
+    private static bool CanResumeWorkerRun(string runDirectory)
+    {
+        var manifestPath = Path.Combine(runDirectory, "run.json");
+        if (!File.Exists(manifestPath))
+        {
+            return false;
+        }
+
+        using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        // A completed worker run is immutable unless explicitly remixed. If
+        // bookkeeping or review selects the chapter again, use a new directory.
+        return !manifest.RootElement.TryGetProperty("status", out var status) ||
+            !string.Equals(status.GetString(), "completed", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

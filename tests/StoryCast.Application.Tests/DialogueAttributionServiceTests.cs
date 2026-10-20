@@ -12,6 +12,104 @@ namespace StoryCast.Application.Tests.Attribution;
 /// </summary>
 public sealed class DialogueAttributionServiceTests
 {
+    /// <summary>Explicit label mappings resolve duplicate names independently of chapter-local IDs.</summary>
+    [Fact]
+    public async Task AttributeAsync_LabelMapping_SelectsCanonicalIdentity()
+    {
+        var registry = new CharacterRegistry
+        {
+            SchemaVersion = 1, BookId = "test-book",
+            Characters = [CreateCharacter("tim", "Tim"), CreateCharacter("chapter-001-user", "User"), CreateCharacter("chapter-002-user", "User")],
+            ProcessedChapterHashes = new Dictionary<string, string>()
+        };
+        DialogueConvention[] rules = [new() { Open = '[', Close = ']', SpeakerId = "tim", SpeakerLabelsOverride = true,
+            SpeakerIdsByLabel = new Dictionary<string, string> { ["User"] = "chapter-001-user" } }];
+        var script = new ProductionScriptSegmenter(conventions: rules).Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-002", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = "[User (Earth): Hello.]"
+        });
+        var generator = new StubStructuredTextGenerator("{}");
+        var result = await new DialogueAttributionService(generator, conventions: rules).AttributeAsync(script, registry);
+        Assert.Equal("chapter-001-user", Assert.Single(result).SpeakerId);
+        Assert.Equal(0, generator.CallCount);
+    }
+
+    /// <summary>Named messages override a book's default; system fields do not.</summary>
+    [Theory]
+    [InlineData("[Establishing… Establishing…]", "tim")]
+    [InlineData("[Luna (Earth): He has a point.]", "luna")]
+    [InlineData("[Luna: He has a point.]", "luna")]
+    [InlineData("[Genetic match score: 53%]", "tim")]
+    public async Task AttributeAsync_BookSpecificLabelsOverrideDefault(string text, string expected)
+    {
+        DialogueConvention[] rules = [new() { Open = '[', Close = ']', SpeakerId = "tim", SpeakerLabelsOverride = true }];
+        var script = new ProductionScriptSegmenter(conventions: rules).Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-001", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = text
+        });
+        var generator = new StubStructuredTextGenerator("{}");
+        var result = await new DialogueAttributionService(generator, conventions: rules)
+            .AttributeAsync(script, CreateTimAndLunaRegistry());
+        Assert.Equal(expected, Assert.Single(result).SpeakerId);
+        Assert.Equal(0, generator.CallCount);
+    }
+
+    /// <summary>Explicit book conventions bypass model guesses for multiple designated speakers.</summary>
+    [Fact]
+    public async Task AttributeAsync_DelimiterRules_AssignSpeakersWithoutGeneration()
+    {
+        DialogueConvention[] rules =
+        [
+            new() { Open = '[', Close = ']', SpeakerId = "tim" },
+            new() { Open = '{', Close = '}', SpeakerId = "luna" }
+        ];
+        var script = new ProductionScriptSegmenter(conventions: rules).Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-001", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = "[Scan complete.]\n\n{Can you hear me?}"
+        });
+        var generator = new StubStructuredTextGenerator("{}");
+        var result = await new DialogueAttributionService(generator, conventions: rules)
+            .AttributeAsync(script, CreateTimAndLunaRegistry());
+        Assert.Equal(0, generator.CallCount);
+        Assert.Equal(new[] { "tim", "luna" }, result.Select(assignment => assignment.SpeakerId));
+        Assert.All(result, assignment => Assert.Equal(1m, assignment.Confidence));
+    }
+
+    /// <summary>Only unmapped dialogue is submitted to the attribution model.</summary>
+    [Fact]
+    public async Task AttributeAsync_MixedDialogue_KeepsMappedSpeakerOutOfModelBatch()
+    {
+        DialogueConvention[] rules = [new() { Open = '[', Close = ']', SpeakerId = "tim" }];
+        var script = new ProductionScriptSegmenter(conventions: rules).Segment(new PreparedChapter
+        {
+            ChapterId = "chapter-001", SourcePath = "chapter.md", SourceSha256 = new string('a', 64),
+            PreparationVersion = "1", SpokenText = "[Scan complete.]\n\n\"Hello.\""
+        });
+        var generator = new BatchGenerator((_, indexes, _) => JsonSerializer.Serialize(new
+        {
+            assignments = indexes.Select(index => new { segmentIndex = index, speakerId = "luna",
+                confidence = 0.85m, delivery = "calm", rationale = "Established speaker." })
+        }));
+        var result = await new DialogueAttributionService(generator, conventions: rules)
+            .AttributeAsync(script, CreateTimAndLunaRegistry());
+        Assert.Single(Assert.Single(generator.Requests).Indexes);
+        Assert.Equal(new[] { "tim", "luna" }, result.Select(assignment => assignment.SpeakerId));
+    }
+
+    /// <summary>An invalid mapping cannot silently fall back to a guessed speaker.</summary>
+    [Fact]
+    public async Task AttributeAsync_UnknownMappedSpeaker_RejectsConfiguration()
+    {
+        var generator = new StubStructuredTextGenerator("{}");
+        DialogueConvention[] rules = [new() { Open = '[', Close = ']', SpeakerId = "missing" }];
+        await Assert.ThrowsAsync<InvalidDataException>(() => new DialogueAttributionService(generator, conventions: rules)
+            .AttributeAsync(CreateScript(), CreateTimAndLunaRegistry()));
+        Assert.Equal(0, generator.CallCount);
+    }
+
     /// <summary>Rejects a valid ID that contradicts the explicitly identified speaker.</summary>
     [Theory]
     [InlineData("Continuation of Tim's response in the same paragraph; he introduces himself as Tim.")]

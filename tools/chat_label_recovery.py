@@ -1,17 +1,10 @@
 """Source-preserving speech recovery for ambiguous structured chat labels."""
 import re
-from chat_pronunciations import spelling, phonetic_spelling
 from pronunciations import canonicalize_transcription
 from spoken_text import normalize_spoken_text
 from verify_voice_library import normalize_words
 
 LABEL = re.compile(r"^\[(?P<name>[^\[\]\n:]+?)\s*\((?P<location>[^\[\]\n:]+)\)\s*:\s*(?P<body>.*)\]$", re.DOTALL)
-
-
-def literal_spelling(handle):
-    # Punctuation gives each letter an audible boundary; space-only runs can
-    # cause the synthesizer to swallow letters in an unfamiliar long handle.
-    return phonetic_spelling(handle) + "."
 
 
 def recover_chat_labels(manifest, verification, pronunciations):
@@ -24,7 +17,7 @@ def recover_chat_labels(manifest, verification, pronunciations):
         segment = segments[rejected["segmentIndex"]]
         index = rejected["chunkIndex"]
         previous = segment.get("chunkSpeechOverrides", {}).get(str(index))
-        if previous and previous.get("version", 1) >= 4:
+        if previous and previous.get("version", 1) >= 5:
             continue
         chunk = next((chunk for chunk in segment.get("chunks", []) if chunk["index"] == index), None)
         if chunk is None:
@@ -56,30 +49,43 @@ def recover_chat_labels(manifest, verification, pronunciations):
             continue
         original = previous["originalText"] if previous else chunk["sourceText"]
         original_match = LABEL.fullmatch(original.strip())
-        prepared = original.replace(original_match["name"], literal_spelling(entry["canonical"]), 1)
+        prepared = original.replace(original_match["name"], entry["spokenText"] + ".", 1)
         segment.setdefault("chunkSpeechOverrides", {})[str(index)] = {
             "originalText": original, "sourceText": prepared, "canonical": entry["canonical"],
-            "reason": "ambiguous-chat-label-spelled-literally", "version": 4}
+            "reason": "ambiguous-chat-label-boundary", "version": 5, "spokenName": entry["spokenText"]}
         recovered.append((segment["index"], index))
     return recovered
 
 
-def apply_chunk_speech_overrides(units, segment):
+def apply_chunk_speech_overrides(units, segment, *, discard_stale=False):
     result = list(units)
-    for key, override in (segment or {}).get("chunkSpeechOverrides", {}).items():
+    overrides = (segment or {}).get("chunkSpeechOverrides", {})
+    for key, override in list(overrides.items()):
         index = int(key)
-        if index >= len(result) or result[index][0] not in (override["originalText"], override["sourceText"]):
-            raise ValueError("Chat speech override no longer matches its original chunk.")
         original = LABEL.fullmatch(override["originalText"].strip())
         prepared = LABEL.fullmatch(override["sourceText"].strip())
         if original is None or prepared is None or original["location"] != prepared["location"] or original["body"] != prepared["body"]:
             raise ValueError("Chat speech override changed message content.")
         version = override.get("version", 1)
-        expected = (literal_spelling(override["canonical"]) if version >= 4 else
-                    ", ".join(spelling(override["canonical"]).split()) + "." if version == 3 else
-                    ", ".join(spelling(override["canonical"]).split()) if version == 2 else
-                    spelling(override["canonical"]))
+        if version < 5:
+            # Retire old letter/NATO fallbacks while preserving the message.
+            if 0 <= index < len(result) and result[index][0] == override["sourceText"]:
+                result[index] = (override["originalText"], result[index][1])
+            del overrides[key]
+            continue
+        expected = override["spokenName"] + "."
+        if version >= 5 and override["spokenName"].casefold() != original["name"].strip().casefold():
+            raise ValueError("Chat speech override changed the spoken username.")
         if prepared["name"] != expected:
             raise ValueError("Chat speech override does not preserve literal handle spelling.")
+        if index < 0 or index >= len(result) or result[index][0] not in (override["originalText"], override["sourceText"]):
+            if not discard_stale:
+                raise ValueError("Chat speech override no longer matches its original chunk.")
+            # Chunk boundaries or speech preparation changed since this repair.
+            # Synthesize the current text normally and verify the new audio;
+            # never attach a stale repair to a different message.
+            del overrides[key]
+            print(f"Discarding stale chat speech repair for chunk {index}; using current speech text.", flush=True)
+            continue
         result[index] = (override["sourceText"], result[index][1])
     return result

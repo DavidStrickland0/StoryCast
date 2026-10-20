@@ -22,6 +22,27 @@ import produce_chapter
 
 
 class SegmentRetryTests(unittest.TestCase):
+    def test_retry_loop_uses_persistent_verifier_instead_of_subprocess(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, verification, audio = self.create_short_fragment_fixture(root)
+            attempts = []
+            def verify(name, arguments, allowed_exit_codes=(0,)):
+                attempt = len(attempts) + 1
+                attempts.append(attempt)
+                self.assertEqual((0, 2), allowed_exit_codes)
+                self.write_verification(verification, audio, {7: 'fail' if attempt == 1 else 'pass'}, attempt)
+                report = json.loads(verification.read_text())
+                report['segments'][0]['expectedWordCount'] = 20
+                verification.write_text(json.dumps(report))
+                return 2 if attempt == 1 else 0
+            with patch.object(produce_chapter, 'run_stage', side_effect=AssertionError('Unexpected subprocess verifier')):
+                produce_chapter.verify_segments_with_retries(
+                    TOOLS_DIRECTORY, root, root / 'voices', 'chapter-001', root, manifest,
+                    'small.en', 3, [], synthesis_runner=lambda *args, **kwargs: 0,
+                    verification_runner=verify)
+            self.assertEqual([1, 2], attempts)
+
     def test_exhausted_recognition_failure_exports_review_without_erasing_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

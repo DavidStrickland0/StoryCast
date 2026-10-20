@@ -10,11 +10,11 @@ from worker_device import whisper_options
 
 from pronunciations import (
     canonicalize_transcription,
+    unexpected_phonetic_handles,
     find_book_root,
     load_pronunciations,
 )
 from spoken_text import currency_amounts, normalize_spoken_text
-from secondary_transcription import SecondaryTranscriber
 
 def load_json(path: Path) -> dict:
     with path.open(
@@ -190,6 +190,9 @@ def verify_audio(
         except Exception as error:
             secondary_details = {"secondaryModel": secondary_verifier.model_name,
                                  "secondaryAccepted": False, "secondaryError": str(error)}
+    phonetic_errors = unexpected_phonetic_handles(expected_text, transcription, pronunciations)
+    if phonetic_errors:
+        status, verification_mode = "fail", "unexpected-phonetic-username"
     if (
         audio_quality["maximumSilenceSeconds"] > 1.5 or
         audio_quality["leadingSilenceSeconds"] > 0.6 or
@@ -200,6 +203,7 @@ def verify_audio(
     return {
         **name_hint_details,
         **secondary_details,
+        "unexpectedPhoneticHandles": phonetic_errors,
         "expectedWordCount": len(expected_words),
         "transcribedWordCount": len(actual_words),
         "editDistance": distance,
@@ -215,8 +219,7 @@ def verify_audio(
     }
 
 
-def main() -> int:
-    from faster_whisper import WhisperModel
+def main(argv=None, model_cache=None) -> int:
     from verify_voice_library import edit_distance, normalize_words
 
     parser = argparse.ArgumentParser(
@@ -238,7 +241,7 @@ def main() -> int:
         default=None,
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     manifest_path = args.chapter_manifest.resolve()
     manifest = load_json(manifest_path)
@@ -284,16 +287,10 @@ def main() -> int:
                     if re.fullmatch(r"[A-Za-z][A-Za-z '\-]{1,80}", name):
                         character_names.add(name)
     character_names = sorted(character_names)
-    print(
-        f"Loading {args.model} on {whisper_options()['device']}...",
-        flush=True,
-    )
-
-    model = WhisperModel(
-        args.model,
-        **whisper_options(),
-    )
-    secondary_verifier = None if args.secondary_model == "none" else SecondaryTranscriber(args.secondary_model)
+    from verification_models import VerificationModels
+    models = model_cache if model_cache is not None else VerificationModels()
+    model = models.primary(args.model, whisper_options())
+    secondary_verifier = models.secondary(args.secondary_model)
     policy_inputs = {"model": args.model, "secondaryModel": args.secondary_model,
                      "pronunciations": pronunciations, "characterNames": sorted(character_names)}
     policy_digest = hashlib.sha256(json.dumps(policy_inputs, sort_keys=True).encode())
@@ -362,6 +359,10 @@ def main() -> int:
                 result["verificationPolicy"] = policy
                 result["audioSha256"] = hashlib.sha256(chunk_audio.read_bytes()).hexdigest() if chunk_audio.is_file() else None
             result["verificationReused"] = reused
+            # Only the verifier can promote a newly generated clip. Cache
+            # hits still pass through this chapter's current verification.
+            from shared_audio_cache import SharedAudioCache
+            result['sharedCachePublished'] = SharedAudioCache().publish(chunk, result)
             result.update(
                 {
                     "segmentIndex": segment["index"],

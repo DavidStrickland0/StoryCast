@@ -157,6 +157,9 @@ def normalize_spoken_text(text: str) -> str:
 
     # OS is an initialism. Match uppercase only so ordinary prose is untouched.
     text = re.sub(r"(?<!\w)OS(?!\w)", "O S", text)
+    # Identification is pronounced as letter names, not the contraction I'd.
+    # Match uppercase only and leave words/handles containing ID untouched.
+    text = re.sub(r"(?<!\w)ID(?!\w)", "I D", text)
     # A bare I is usually the pronoun, and IV can mean intravenous. Expand
     # Roman numerals only in the explicit World War context.
     text = re.sub(
@@ -180,7 +183,7 @@ def normalize_spoken_text(text: str) -> str:
         flags=re.IGNORECASE,
     )
     result = re.sub(
-        r"(?<!\w)(HP|WTF|IRL|POV|JRPG)(?!\w)",
+        r"(?<!\w)(VIP|HP|WTF|IRL|POV|JRPG)(?!\w)",
         lambda match: " ".join(match[0].upper()),
         result,
         flags=re.IGNORECASE,

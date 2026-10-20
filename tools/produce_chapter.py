@@ -27,6 +27,24 @@ class FragmentRewriteUnavailable(RuntimeError):
     """The model could not supply a usable replacement; audio can still proceed."""
 
 
+class PersistentVerificationRunner:
+    """Run verification in this process, retaining ASR models for retry passes."""
+    def __init__(self):
+        from verification_models import VerificationModels
+        self.models = VerificationModels()
+
+    def run(self, name, arguments, allowed_exit_codes=(0,)):
+        import verify_chapter_probe
+        print(f"\n===== {name} =====", flush=True)
+        code = verify_chapter_probe.main(arguments[2:], model_cache=self.models)
+        if code not in allowed_exit_codes:
+            raise RuntimeError(f"{name} failed with exit code {code}.")
+        return code
+
+    def close(self):
+        self.models.close()
+
+
 class PersistentSynthesisWorker:
     def __init__(self, script_path: Path) -> None:
         self.process = subprocess.Popen(
@@ -152,10 +170,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--rewrite-model",
+        "--speech-repair-model", "--rewrite-model", dest="rewrite_model",
         default="qwen3.8:27b",
+        help="Model for wording repairs after speech verification fails; may rephrase spoken text. --rewrite-model is a legacy alias.",
     )
-    parser.add_argument("--audio-preparation-model", help="Defaults to the selected rewrite model.")
+    parser.add_argument("--audio-preparation-model", help="Model for preparing text for speech; defaults to the selected speech-repair model.")
     parser.add_argument(
         "--ollama-url",
         default=(
@@ -613,6 +632,7 @@ def verify_segments_with_retries(
     max_fragment_rewrites: int = 3,
     synthesis_runner=None,
     allow_review: bool = False,
+    verification_runner=None,
 ) -> None:
     verification_path = chapter_manifest.parent / "verification.json"
     retry_state_path = chapter_manifest.parent / "segment-retry-state.json"
@@ -973,7 +993,7 @@ def verify_segments_with_retries(
                     ]
                 )
 
-        exit_code = run_stage(
+        exit_code = (verification_runner or run_stage)(
             f"Segment verification attempt {attempt}",
             verification_arguments,
             allowed_exit_codes=(0, 2),
@@ -1574,6 +1594,7 @@ def main() -> int:
 
     current_stage = "initialization"
     synthesis_worker = None
+    verification_runner = None
 
     try:
         current_stage = "audio text preparation"
@@ -1582,6 +1603,7 @@ def main() -> int:
         prepare_chapter(book, args.chapter, args.audio_preparation_model or args.rewrite_model, args.ollama_url,
                         checkpoint_segments=checkpoint_segments)
         current_stage = "synthesis"
+        verification_runner = PersistentVerificationRunner()
 
         synthesis_worker = PersistentSynthesisWorker(
             tools_directory /
@@ -1675,12 +1697,15 @@ def main() -> int:
                 args.ollama_url,
                 args.max_fragment_rewrites,
                 synthesis_runner=synthesis_worker.run,
+                verification_runner=verification_runner.run,
                 allow_review=args.allow_review,
             ),
         )
 
         synthesis_worker.close()
         synthesis_worker = None
+        verification_runner.close()
+        verification_runner = None
 
         raw_chapter_audio = (
             chapter_directory /
@@ -1993,6 +2018,8 @@ def main() -> int:
 
         return 0
     except Exception as error:
+        if verification_runner is not None:
+            verification_runner.close()
         if synthesis_worker is not None:
             synthesis_worker.close()
 

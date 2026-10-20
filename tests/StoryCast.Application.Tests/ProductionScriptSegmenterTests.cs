@@ -9,6 +9,31 @@ namespace StoryCast.Application.Tests.Attribution;
 /// </summary>
 public sealed class ProductionScriptSegmenterTests
 {
+    /// <summary>Square-bracket speech is explicitly enabled per book and preserves exact text.</summary>
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 2)]
+    public void Segment_SquareBracketSpeechRequiresOptIn(bool enabled, int expectedDialogue)
+    {
+        const string text = "Adam waited.\n\n[Scan complete. Operator detected.]\n\n\"Who are you?\"";
+        var script = new ProductionScriptSegmenter(enabled).Segment(CreateChapter(text));
+        Assert.Equal(expectedDialogue, script.Segments.Count(segment => segment.Kind == SegmentKind.Dialogue));
+        Assert.Equal(text, string.Concat(script.Segments.Select(segment => segment.SourceText)));
+        if (enabled)
+            Assert.Contains(script.Segments, segment => segment.Kind == SegmentKind.Dialogue &&
+                segment.SourceText.Contains("[Scan complete. Operator detected.]"));
+    }
+
+    /// <summary>Unclosed brackets cannot swallow a later paragraph's human speech.</summary>
+    [Fact]
+    public void Segment_UnclosedBracketKeepsLaterSpeech()
+    {
+        const string text = "[Scanning\n\nAdam said, \"Ready.\"";
+        var script = new ProductionScriptSegmenter(true).Segment(CreateChapter(text));
+        Assert.Equal(text, string.Concat(script.Segments.Select(segment => segment.SourceText)));
+        Assert.Equal("\"Ready.\"", Assert.Single(script.Segments, segment => segment.Kind == SegmentKind.Dialogue).SourceText);
+    }
+
     /// <summary>Missing quotation marks cannot invert later paragraphs.</summary>
     [Fact]
     public void Segment_UnclosedParagraphDoesNotConsumeLaterDialogue()

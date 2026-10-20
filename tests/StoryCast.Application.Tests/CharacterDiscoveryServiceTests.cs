@@ -11,6 +11,49 @@ namespace StoryCast.Application.Tests.Attribution;
 /// </summary>
 public sealed class CharacterDiscoveryServiceTests
 {
+    /// <summary>Repeated explicit handles can converge on one legacy identity.</summary>
+    [Fact]
+    public async Task DiscoverAsync_CoalescesCanonicalChatHandleMetadata()
+    {
+        var first = new { id = "chapter-126-tessisdabest", displayName = "Tessisdabest", aliases = new[] { "Tess" },
+            description = "Commenter", voiceTraits = new[] { "bright" }, voicePresentation = "unspecified",
+            isNamed = false, importance = "minor", isNarrator = false };
+        var second = first with { id = "chapter-019-tessisdabest", description = "Returning chat participant",
+            aliases = new[] { "Tessi" }, voiceTraits = new[] { "clear" } };
+        var generator = new StubStructuredTextGenerator(JsonSerializer.Serialize(new { characters = new[] { first, second } }));
+        var chapter = new PreparedChapter { ChapterId = "chapter-126", SourcePath = "chapter.txt",
+            SourceSha256 = new string('a', 64), PreparationVersion = "1", SpokenText = "[Tessisdabest (Earth): Hello.]" };
+        var known = new CharacterProfile { Id = "chapter-019-tessisdabest", DisplayName = "Tessisdabest", IsNamed = false };
+        var result = await new CharacterDiscoveryService(generator).DiscoverAsync(chapter, [known]);
+        var character = Assert.Single(result);
+        Assert.Equal(known.Id, character.Id);
+        Assert.Contains("Tess", character.Aliases);
+        Assert.Contains("Tessi", character.Aliases);
+        Assert.Equal(1, generator.Calls);
+    }
+
+    /// <summary>Explicit chat handles remain named and reuse a stable ID despite incorrect model flags.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiscoverAsync_ExplicitChatHandleDoesNotCreateAnotherChapterIdentity(bool existing)
+    {
+        var candidate = new { id = "chapter-037-justiceistruth", displayName = "Justiceistruth", aliases = Array.Empty<string>(),
+            description = "Chat participant", voiceTraits = Array.Empty<string>(), voicePresentation = "unspecified",
+            isNamed = false, importance = "minor", isNarrator = false };
+        var generator = new StubStructuredTextGenerator(JsonSerializer.Serialize(new { characters = new[] { candidate } }));
+        var chapter = new PreparedChapter { ChapterId = "chapter-037", SourcePath = "chapter.txt",
+            SourceSha256 = new string('a', 64), PreparationVersion = "1", SpokenText = "[Justiceistruth (Earth): Hello.]" };
+        CharacterProfile[] known = existing
+            ? [new() { Id = "chapter-013-justiceistruth", DisplayName = "Justiceistruth", IsNamed = false },
+               new() { Id = "chapter-036-justiceistruth", DisplayName = "Justiceistruth", IsNamed = false }]
+            : [];
+        var result = await new CharacterDiscoveryService(generator).DiscoverAsync(chapter, known);
+        var character = Assert.Single(result);
+        Assert.True(character.IsNamed);
+        if (existing) Assert.Equal("chapter-013-justiceistruth", character.Id);
+    }
+
     [Theory]
     [InlineData("female", "male", "female")]
     [InlineData("male", "female", "male")]

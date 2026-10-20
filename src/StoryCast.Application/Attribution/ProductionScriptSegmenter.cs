@@ -9,6 +9,17 @@ namespace StoryCast.Application.Attribution;
 public sealed class ProductionScriptSegmenter
     : IProductionScriptSegmenter
 {
+    private readonly bool squareBracketDialogue;
+    private readonly IReadOnlyList<DialogueConvention> conventions;
+
+    /// <summary>Creates a segmenter with optional square-bracket speech for books that use that convention.</summary>
+    /// <param name="squareBracketDialogue">Whether paired square brackets delimit dialogue.</param>
+    /// <param name="conventions">Additional book-specific speech delimiters.</param>
+    public ProductionScriptSegmenter(bool squareBracketDialogue = false, IReadOnlyList<DialogueConvention>? conventions = null)
+    {
+        this.squareBracketDialogue = squareBracketDialogue;
+        this.conventions = conventions ?? [];
+    }
     /// <summary>
     /// Gets the reserved speaker identifier used before dialogue attribution.
     /// </summary>
@@ -103,12 +114,16 @@ public sealed class ProductionScriptSegmenter
         };
     }
 
-    private static int FindNextOpeningQuote(
+    private int FindNextOpeningQuote(
         string text,
         int start)
     {
         for (var index = start; index < text.Length; index++)
         {
+            if (((squareBracketDialogue && text[index] == '[') || conventions.Any(rule => rule.Open == text[index])) && !IsEscaped(text, index))
+            {
+                return index;
+            }
             if (text[index] == '\u201C')
             {
                 return index;
@@ -124,13 +139,13 @@ public sealed class ProductionScriptSegmenter
         return -1;
     }
 
-    private static int FindClosingQuote(
+    private int FindClosingQuote(
         string text,
         int openingQuote)
     {
         var openingCharacter = text[openingQuote];
-        var closingCharacter =
-            openingCharacter == '\u201C' ? '\u201D' : '"';
+        var closingCharacter = conventions.FirstOrDefault(rule => rule.Open == openingCharacter)?.Close ??
+            (openingCharacter == '[' ? ']' : openingCharacter == '\u201C' ? '\u201D' : '"');
 
         for (var index = openingQuote + 1;
              index < text.Length;

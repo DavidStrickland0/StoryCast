@@ -12,6 +12,53 @@ namespace StoryCast.Application.Tests.Characters;
 /// </summary>
 public sealed class CharacterDiscoveryWorkflowTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ExecuteAsync_RepairsExplicitLabelsOnlyForConfiguredBook(bool configured)
+    {
+        var book = CreateBook("[Beczontop (Imperial Down): Hello.]\n[Establishing…]\n[Genetic match score: 53%]");
+        var hash = new ChapterTextPreparer().Prepare(book.Manuscript.Chapters[0]).SourceSha256;
+        var store = new MemoryCharacterRegistryStore
+        {
+            Registry = new CharacterRegistry
+            {
+                SchemaVersion = 1, BookId = book.Id, Characters = [],
+                ProcessedChapterHashes = new Dictionary<string, string> { ["chapter-001"] = hash }
+            }
+        };
+        var discovery = new StubCharacterDiscoveryService();
+        var workflow = new CharacterDiscoveryWorkflow(new ChapterTextPreparer(), discovery,
+            new CharacterRegistryMerger(), store);
+        var rules = configured ? new[] { new DialogueConvention
+            { Open = '[', Close = ']', SpeakerId = "android", SpeakerLabelsOverride = true } } : [];
+        await workflow.ExecuteAsync(book, chapterId: "chapter-001", dialogueConventions: rules);
+        await workflow.ExecuteAsync(book, chapterId: "chapter-001", dialogueConventions: rules);
+        Assert.Equal(0, discovery.CallCount);
+        Assert.Equal(configured ? 1 : 0, store.Registry!.Characters.Count);
+        if (configured)
+        {
+            var speaker = Assert.Single(store.Registry.Characters);
+            Assert.Equal("Beczontop", speaker.DisplayName);
+            Assert.True(speaker.IsNamed);
+            Assert.Equal("unspecified", speaker.VoicePresentation);
+        }
+        Assert.Equal(hash, store.Registry.ProcessedChapterHashes["chapter-001"]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ExplicitLabelsDoNotSkipNewChapterDiscovery()
+    {
+        var store = new MemoryCharacterRegistryStore();
+        var discovery = new StubCharacterDiscoveryService();
+        var workflow = new CharacterDiscoveryWorkflow(new ChapterTextPreparer(), discovery,
+            new CharacterRegistryMerger(), store);
+        await workflow.ExecuteAsync(CreateBook("[Beczontop (Imperial Down): Hello.]"),
+            chapterId: "chapter-001", dialogueConventions: [new DialogueConvention
+            { Open = '[', Close = ']', SpeakerLabelsOverride = true }]);
+        Assert.Equal(1, discovery.CallCount);
+        Assert.Contains(store.Registry!.Characters, speaker => speaker.DisplayName == "Beczontop");
+    }
     /// <summary>
     /// Verifies that every changed chapter is discovered and saved.
     /// </summary>
@@ -217,7 +264,7 @@ public sealed class CharacterDiscoveryWorkflowTests
                 Assert.Equal(2, completed.ChapterCount);
             });
     }
-    private static BookProject CreateBook()
+    private static BookProject CreateBook(string? firstText = null)
     {
         return new BookProject
         {
@@ -240,7 +287,7 @@ public sealed class CharacterDiscoveryWorkflowTests
                         SourcePath = @"C:\Book\chapter-001.md",
                         Format = ManuscriptFormat.Markdown,
                         RawText =
-                            "Miller said, \"Move.\""
+                            firstText ?? "Miller said, \"Move.\""
                     },
                     new ManuscriptChapter
                     {

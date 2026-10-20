@@ -12,6 +12,16 @@ from spoken_text import currency_amounts, normalize_spoken_text
 
 
 class SpokenTextTests(unittest.TestCase):
+    def test_vip_is_read_as_letters_without_changing_handles(self):
+        self.assertEqual("The V I P entrance. VIPPlayer V I P", normalize_spoken_text("The VIP entrance. VIPPlayer vip"))
+
+    def test_spells_id_without_changing_contractions_or_names(self):
+        self.assertEqual("Show your I D. I'd check it, but I'd rather wait.",
+                         normalize_spoken_text("Show your ID. I'd check it, but I’d rather wait."))
+        self.assertEqual("id Id identity ID123 GRID UserID",
+                         normalize_spoken_text("id Id identity ID123 GRID UserID"))
+        self.assertEqual("[User I D: twelve]", normalize_spoken_text("[User ID: 12]"))
+
     def test_curly_apostrophes_preserve_contractions_and_possessives(self):
         self.assertEqual("Maren's sure she won't leave 'em behind.",
                          normalize_spoken_text("Maren’s sure she won’t leave ‘em behind."))

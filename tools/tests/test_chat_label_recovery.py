@@ -2,17 +2,23 @@ import unittest
 from copy import deepcopy
 from chat_label_recovery import recover_chat_labels, apply_chunk_speech_overrides
 from chat_pronunciations import phonetic_spelling
-from pronunciations import canonicalize_transcription
+from pronunciations import canonicalize_transcription, unexpected_phonetic_handles
 
 
 class ChatLabelRecoveryTests(unittest.TestCase):
-    def test_phonetic_labels_match_only_the_exact_original_letters(self):
+    def test_phonetic_labels_are_not_accepted_as_usernames(self):
         entries = self.fixture()[2]
         phrase = phonetic_spelling("Superhearofangirl")
-        self.assertEqual("Super hear of angirl", canonicalize_transcription(phrase, entries))
-        self.assertEqual("Super hear of angirl", canonicalize_transcription(phrase.replace("Golf", "Gulf"), entries))
-        for changed in (phrase.replace("Hotel", "Bravo"), phrase.replace("Hotel, ", "")):
-            self.assertNotEqual("Super hear of angirl", canonicalize_transcription(changed, entries))
+        self.assertEqual(phrase, canonicalize_transcription(phrase, entries))
+        cm = [{"canonical": "CM", "spokenText": "C M", "mode": "validated-word-split"}]
+        self.assertEqual("Charlie Mike", canonicalize_transcription("Charlie Mike", cm))
+        # Literal source words must remain words, never decode into initials.
+        self.assertNotEqual(canonicalize_transcription("Charlie Mike", cm), canonicalize_transcription("CM", cm))
+        self.assertEqual([], unexpected_phonetic_handles("Charlie Mike said hello", "Charlie Mike said hello", cm))
+        self.assertEqual("C M", canonicalize_transcription("CM", cm))
+        self.assertEqual(["CM"], unexpected_phonetic_handles("C M from Earth: " + "Hi " * 100, "Charlie Mike from Earth: " + "Hi " * 100, cm))
+        self.assertEqual([], unexpected_phonetic_handles("C M said hello", "C M said hello", cm))
+
 
     def fixture(self, heard="Earth behind you"):
         text = "[Super hear of angirl (Earth): BEHIND YOU!]"
@@ -31,7 +37,7 @@ class ChatLabelRecoveryTests(unittest.TestCase):
         self.assertEqual(original["segments"][0]["sourceText"], segment["sourceText"])
         self.assertEqual(original["segments"][0]["chunks"], segment["chunks"])
         override = segment["chunkSpeechOverrides"]["2"]
-        self.assertEqual("[Sierra, Uniform, Papa, Echo, Romeo, Hotel, Echo, Alpha, Romeo, Oscar, Foxtrot, Alpha, November, Golf, India, Romeo, Lima. (Earth): BEHIND YOU!]", override["sourceText"])
+        self.assertEqual("[Super hear of angirl. (Earth): BEHIND YOU!]", override["sourceText"])
         self.assertEqual([], recover_chat_labels(manifest, report, entries))
 
     def test_message_errors_never_change_the_source_message(self):
@@ -57,7 +63,7 @@ class ChatLabelRecoveryTests(unittest.TestCase):
         segment["chunkSpeechOverrides"] = {"2": {"originalText": original, "sourceText": old,
             "canonical": "Superhearofangirl", "version": 1}}
         self.assertEqual([(0, 2)], recover_chat_labels(manifest, report, entries))
-        self.assertEqual(4, segment["chunkSpeechOverrides"]["2"]["version"])
+        self.assertEqual(5, segment["chunkSpeechOverrides"]["2"]["version"])
         self.assertEqual(original, segment["chunkSpeechOverrides"]["2"]["originalText"])
         self.assertEqual([], recover_chat_labels(manifest, report, entries))
 
@@ -79,7 +85,22 @@ class ChatLabelRecoveryTests(unittest.TestCase):
         units = [("a", 0), ("b", 0), ("Changed source", 0)]
         with self.assertRaises(ValueError):
             apply_chunk_speech_overrides(units, segment)
-        units[2] = (segment["chunks"][0]["sourceText"], 0)
+
+    def test_retry_discards_stale_override_and_keeps_current_text(self):
+        for units in ([("Changed source", .3)], [("a", 0), ("b", 0), ("Changed source", .3)]):
+            manifest, report, entries = self.fixture()
+            recover_chat_labels(manifest, report, entries)
+            segment = manifest["segments"][0]
+            self.assertEqual(units, apply_chunk_speech_overrides(units, segment, discard_stale=True))
+            self.assertEqual({}, segment["chunkSpeechOverrides"])
+
+    def test_retry_still_rejects_tampered_override_even_when_stale(self):
+        manifest, report, entries = self.fixture()
+        recover_chat_labels(manifest, report, entries)
+        segment = manifest["segments"][0]
         segment["chunkSpeechOverrides"]["2"]["sourceText"] = segment["chunkSpeechOverrides"]["2"]["sourceText"].replace("BEHIND YOU", "BEHIND ME")
+        with self.assertRaises(ValueError):
+            apply_chunk_speech_overrides([], segment, discard_stale=True)
+        units = [("a", 0), ("b", 0), (segment["chunks"][0]["sourceText"], 0)]
         with self.assertRaises(ValueError):
             apply_chunk_speech_overrides(units, segment)

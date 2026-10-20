@@ -30,6 +30,7 @@ from prepare_audio_text import load_prepared
 from context_pronunciations import load_context_plan, render_units, context_fingerprint, speech_base
 from synthesis_chunking import ends_at_sentence_boundary, split_synthesis_text, parse_chunk_selector
 from synthesis_chunking import MAX_SYNTHESIS_CHARACTERS, split_chat_message
+from shared_audio_cache import SharedAudioCache, chunk_identity, load_model_with_identity, runtime_identity
 
 
 DEFAULT_NARRATOR_EXAGGERATION = 0.4
@@ -38,6 +39,7 @@ DEFAULT_CFG_WEIGHT = 0.5
 DEFAULT_TEMPERATURE = 0.7
 WORKER_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
 _CACHED_MODEL = None
+_CACHED_MODEL_FINGERPRINT = None
 
 
 def prepare_synthesis_text(text: str) -> str:
@@ -560,7 +562,7 @@ def main(
                             segment.get("spokenText", segment["sourceText"]), pronunciations))),
                         markdown_headings,
                         max_characters=segment.get("synthesisMaxCharacters", MAX_SYNTHESIS_CHARACTERS),
-                    ), existing),
+                    ), existing, discard_stale=True),
                     chapter_directory,
                 ) and
                 Path(
@@ -619,14 +621,13 @@ def main(
     print(f"Attempt:  {args.attempt}", flush=True)
     print(f"Reused:   {reused_segments}", flush=True)
     print(f"Device:   {device}", flush=True)
-    global _CACHED_MODEL
+    global _CACHED_MODEL, _CACHED_MODEL_FINGERPRINT
     model = None
 
     if segments:
         if _CACHED_MODEL is None:
             from cache_tokenizer import configure_tokenizer_cache
             configure_tokenizer_cache()
-            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
             print()
             print(
@@ -634,10 +635,7 @@ def main(
                 flush=True,
             )
 
-            _CACHED_MODEL = ChatterboxMultilingualTTS.from_pretrained(
-                device=device,
-                t3_model="v3",
-            )
+            _CACHED_MODEL, _CACHED_MODEL_FINGERPRINT = load_model_with_identity(device)
         else:
             print()
             print(
@@ -649,6 +647,8 @@ def main(
         model = _CACHED_MODEL
 
     generated_segments: list[dict] = []
+    shared_cache = SharedAudioCache()
+    cache_runtime = runtime_identity(device, torch) if segments else {}
 
     if segments and model is None:
         raise RuntimeError(
@@ -722,7 +722,7 @@ def main(
             max_characters=segment.get("synthesisMaxCharacters", MAX_SYNTHESIS_CHARACTERS),
         )
         previous_segment = next((item for item in manifest["segments"] if item["index"] == segment_index), None)
-        synthesis_units = apply_chunk_speech_overrides(synthesis_units, previous_segment)
+        synthesis_units = apply_chunk_speech_overrides(synthesis_units, previous_segment, discard_stale=True)
         contextual_plan = segment.get("contextPronunciations", {})
         contextual_units = render_units(synthesis_units, contextual_plan, speech_base(spoken_text, pronunciations), include_decisions=True)
 
@@ -784,11 +784,7 @@ def main(
                 regenerate = not resume_chunk_is_reusable(existing_chunks.get(chunk_index), text, pause,
                     chapter_directory / f"segment-{segment_index:04d}-chunk-{chunk_index:04d}.wav")
             regenerate_chunks[chunk_index] = regenerate
-        if any(regenerate_chunks.values()):
-            model.prepare_conditionals(
-                str(voice_sample),
-                exaggeration=synthesis_settings["exaggeration"],
-            )
+        conditionals_prepared = False
 
         for chunk_index, synthesis_unit in enumerate(
             synthesis_units
@@ -840,41 +836,37 @@ def main(
                     f"{len(chunk_text)} characters",
                     flush=True,
                 )
-                torch.manual_seed(chunk_seed)
-
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(chunk_seed)
-
-                with torch.inference_mode():
-                    generated_audio = model.generate(
-                        synthesis_text,
-                        language_id="en",
-                        audio_prompt_path=None,
-                        exaggeration=synthesis_settings["exaggeration"],
-                        cfg_weight=synthesis_settings["cfgWeight"],
-                        temperature=synthesis_settings["temperature"],
-                    )
-
-                chunk_audio = generated_audio.detach().to(
-                    device="cpu",
-                    dtype=torch.float32,
-                )
-                del generated_audio
-                chunk_audio, audio_processing = polish_audio(
-                    chunk_audio,
-                    model.sr,
-                )
-
-                chunk_temporary_path = chunk_output_path.with_name(
-                    f".{chunk_output_path.name}.tmp"
-                )
-                torchaudio.save(
-                    str(chunk_temporary_path),
-                    chunk_audio,
-                    model.sr,
-                    format="wav",
-                )
-                chunk_temporary_path.replace(chunk_output_path)
+                cache_inputs = chunk_identity(
+                    chunk_text, synthesis_text, voice_id, synthesis_settings['referenceSha256'],
+                    synthesis_settings, _CACHED_MODEL_FINGERPRINT, model.sr, cache_runtime,
+                    delivery=segment.get('delivery', ''), performance=segment.get('performance'),
+                    context=contextual_units[chunk_index][1], pause=pause_after_seconds, attempt=args.attempt)
+                chunk_seed = cache_inputs['seed']
+                cached = shared_cache.restore(cache_inputs, chunk_output_path)
+                if cached:
+                    chunk_audio, cached_rate = torchaudio.load(str(chunk_output_path))
+                    if cached_rate != model.sr:
+                        raise RuntimeError('Shared chunk cache contains an unexpected sample rate.')
+                    audio_processing = cached['audioProcessing']
+                    print(f"  chunk {chunk_index + 1}/{len(synthesis_units)} | shared verified cache hit", flush=True)
+                else:
+                    if not conditionals_prepared:
+                        model.prepare_conditionals(str(voice_sample), exaggeration=synthesis_settings['exaggeration'])
+                        conditionals_prepared = True
+                    torch.manual_seed(chunk_seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(chunk_seed)
+                    with torch.inference_mode():
+                        generated_audio = model.generate(
+                            synthesis_text, language_id='en', audio_prompt_path=None,
+                            exaggeration=synthesis_settings['exaggeration'],
+                            cfg_weight=synthesis_settings['cfgWeight'], temperature=synthesis_settings['temperature'])
+                    chunk_audio = generated_audio.detach().to(device='cpu', dtype=torch.float32)
+                    del generated_audio
+                    chunk_audio, audio_processing = polish_audio(chunk_audio, model.sr)
+                    chunk_temporary_path = chunk_output_path.with_name(f'.{chunk_output_path.name}.tmp')
+                    torchaudio.save(str(chunk_temporary_path), chunk_audio, model.sr, format='wav')
+                    chunk_temporary_path.replace(chunk_output_path)
                 chunk_record = {
                     "index": chunk_index,
                     "sourceText": chunk_text,
@@ -888,6 +880,8 @@ def main(
                     "audioPath": str(chunk_output_path),
                     "sha256": file_sha256(chunk_output_path),
                     "audioProcessing": audio_processing,
+                    "sharedCacheInputs": cache_inputs,
+                    "sharedCacheHit": bool(cached),
                 }
                 generated_chunks.append(chunk_audio)
                 chunk_records.append(chunk_record)
@@ -958,6 +952,7 @@ def main(
                     "",
                 ),
                 "seed": seed,
+                "seedStrategy": "content-derived-per-chunk-v1",
                 "attempt": args.attempt,
                 "sampleRate": model.sr,
                 "durationSeconds":

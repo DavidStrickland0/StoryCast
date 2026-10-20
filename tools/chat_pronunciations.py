@@ -46,6 +46,13 @@ def prepare_chat_pronunciations(book: Path, segments: list[dict], model: str, ol
     path = Path(book) / "auto-pronunciations.json"
     saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"schemaVersion": 1, "entries": []}
     refreshed = False
+    # Short uppercase handles are initials, never NATO codewords.
+    for entry in saved["entries"]:
+        if re.fullmatch(r"[A-Z]{2,4}", entry.get("canonical", "")):
+            spoken = spelling(entry["canonical"])
+            if entry.get("spokenText") != spoken:
+                entry.update(spokenText=spoken, acceptedTranscriptions=[spoken], mode="letter-spelling-fallback")
+                refreshed = True
     for entry in saved["entries"]:
         if entry.get("mode") == "validated-word-split":
             split = entry["acceptedTranscriptions"][-1]
@@ -80,7 +87,7 @@ def prepare_chat_pronunciations(book: Path, segments: list[dict], model: str, ol
         mode = "validated-word-split"
         try:
             split = result.get(handle)
-            spoken = validate_split(handle, split)
+            spoken = spelling(handle) if re.fullmatch(r"[A-Z]{2,4}", handle) else validate_split(handle, split)
         except (ValueError, TypeError):
             spoken, mode, split = spelling(handle), "letter-spelling-fallback", None
         saved["entries"].append({"canonical": handle, "spokenText": spoken,

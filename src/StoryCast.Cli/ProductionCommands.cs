@@ -49,6 +49,7 @@ internal static class ProductionCommands
                 "small.en";
 
             var rewriteModel =
+                GetOptionValue(args, "--speech-repair-model") ??
                 GetOptionValue(
                     args,
                     "--rewrite-model") ??
@@ -172,7 +173,7 @@ internal static class ProductionCommands
             Console.WriteLine($"Chapter:       {chapterId}");
             Console.WriteLine($"Voice library: {libraryPath}");
             Console.WriteLine($"Whisper:       {whisperModel}");
-            Console.WriteLine($"Rewrite model: {rewriteModel}");
+            Console.WriteLine($"Speech repair: {rewriteModel} (failed speech verification; may rephrase spoken text)");
             Console.WriteLine($"Ollama:        {ollamaUrl}");
 
             if (runDirectoryPath is not null)
@@ -333,6 +334,8 @@ internal static class ProductionCommands
             chapterId,
             "--whisper-model",
             whisperModel,
+            // Retain the worker protocol spelling so existing Docker images
+            // accept the public --speech-repair-model option without a rebuild.
             "--rewrite-model",
             rewriteModel,
             "--ollama-url",

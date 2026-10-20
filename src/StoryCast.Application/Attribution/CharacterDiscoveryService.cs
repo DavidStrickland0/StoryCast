@@ -21,6 +21,16 @@ public sealed partial class CharacterDiscoveryService
         entities that speak dialogue or serve as a first-person narrator in
         the supplied chapter.
 
+        Some books use [square brackets] for audible AI, system, or android
+        speech instead of quotation marks. Discover those speakers when the
+        surrounding story establishes that convention. Distinguish a ship AI
+        from an android when context does; a speaking mode is not a new identity.
+        Bracketed chapter subtitles and editorial notes are not speakers.
+        A message such as [Forever1stCommenter (Earth): He has a point.] has
+        Forever1stCommenter as its speaker; Earth is origin metadata, not an
+        alias or speaker. Reuse the same named identity across messages and
+        chapters. Do not merge a named commenter with the system or android.
+
         Include participants in untagged back-and-forth dialogue, not just
         characters with explicit "said" tags. Infer distinct participants from
         nearby actions, questions and replies, forms of address, and the full
@@ -141,7 +151,7 @@ public sealed partial class CharacterDiscoveryService
                 {
                     throw new InvalidDataException("Character discovery returned invalid JSON.", exception);
                 }
-                var profiles = ValidateAndMap(response, knownCharacters, chapter.ChapterId);
+                var profiles = ValidateAndMap(response, knownCharacters, chapter.ChapterId, chapter.SpokenText);
                 var verified = await new CharacterPresentationVerifier(generator)
                     .VerifyAsync(chapter.SpokenText, profiles, cancellationToken);
                 return profiles.Select(profile =>
@@ -181,7 +191,8 @@ public sealed partial class CharacterDiscoveryService
     private static IReadOnlyList<CharacterProfile> ValidateAndMap(
         CharacterDiscoveryResponse response,
         IReadOnlyList<CharacterProfile> knownCharacters,
-        string chapterId)
+        string chapterId,
+        string chapterText)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(chapterId);
         var knownById = knownCharacters.ToDictionary(
@@ -193,6 +204,9 @@ public sealed partial class CharacterDiscoveryService
 
         var profiles = new List<CharacterProfile>(
             response.Characters.Count);
+        var labeledNames = Regex.Matches(chapterText, @"\[(?<label>[^\[\]:\r\n]{1,150}):")
+            .Select(match => Regex.Replace(match.Groups["label"].Value.Trim(), @"\s*\([^()]*\)\s*$", "").Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         foreach (var candidate in response.Characters)
         {
@@ -241,6 +255,22 @@ public sealed partial class CharacterDiscoveryService
                 knownById.TryGetValue(
                     candidateId,
                     out var existing);
+            var explicitChatHandle = labeledNames.Contains(candidate.DisplayName.Trim());
+            if (explicitChatHandle)
+            {
+                // Explicit handles are named identities, even if generation
+                // incorrectly reports isNamed=false. Prefer a stable existing
+                // identity over new or repeatedly chapter-prefixed IDs.
+                var match = knownCharacters.Where(character =>
+                        character.DisplayName.Equals(candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(character => character.Id.StartsWith("chapter-", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+                    .ThenBy(character => character.Id, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
+                if (match is not null)
+                {
+                    existing = match;
+                    hasExistingCharacter = true;
+                }
+            }
 
             // A known named identity stays named even if the model incorrectly
             // labels the new occurrence unnamed or proposes a chapter-scoped ID.
@@ -259,7 +289,7 @@ public sealed partial class CharacterDiscoveryService
             }
 
             var isNamed =
-                candidate.IsNamed ||
+                explicitChatHandle || candidate.IsNamed ||
                 (hasExistingCharacter &&
                  existing!.IsNamed);
 
@@ -283,6 +313,25 @@ public sealed partial class CharacterDiscoveryService
             if (!returnedIds.Add(normalizedId))
             {
                 var previous = profiles.Single(profile => string.Equals(profile.Id, normalizedId, StringComparison.OrdinalIgnoreCase));
+                if (explicitChatHandle && previous.DisplayName.Equals(candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                    previous.IsNarrator == candidate.IsNarrator &&
+                    (previous.VoicePresentation == presentation || previous.VoicePresentation == "unspecified" || presentation == "unspecified"))
+                {
+                    // Canonicalizing legacy chapter-scoped handles can turn
+                    // multiple generated entries into the same known person.
+                    // Descriptive differences do not create a new identity.
+                    profiles[profiles.IndexOf(previous)] = new CharacterProfile
+                    {
+                        Id = previous.Id, DisplayName = previous.DisplayName,
+                        Aliases = NormalizeValues(previous.Aliases.Concat(candidate.Aliases).ToArray()),
+                        Description = previous.Description,
+                        VoiceTraits = NormalizeVoiceTraits(previous.VoiceTraits.Concat(candidate.VoiceTraits).ToArray()),
+                        VoicePresentation = previous.VoicePresentation == "unspecified" ? presentation : previous.VoicePresentation,
+                        IsNamed = true, IsNarrator = previous.IsNarrator,
+                        Importance = previous.Importance > importance ? previous.Importance : importance
+                    };
+                    continue;
+                }
                 if (previous.DisplayName == candidate.DisplayName.Trim() &&
                     previous.Description == candidate.Description.Trim() &&
                     previous.IsNamed == isNamed && previous.Importance == importance &&

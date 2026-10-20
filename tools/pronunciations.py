@@ -7,7 +7,7 @@ from pathlib import Path
 
 from book_manifest import find_book_root
 
-AUTOMATIC_HANDLING_VERSION = 2
+AUTOMATIC_HANDLING_VERSION = 3
 
 def load_pronunciations(book: Path) -> list[dict]:
     """Load and validate generic pronunciation entries."""
@@ -123,15 +123,6 @@ def canonicalize_transcription(
                 )
             ),
         }
-        if automatic and re.fullmatch(r"[A-Za-z0-9_]+", canonical):
-            from chat_pronunciations import phonetic_spelling
-            phonetic = phonetic_spelling(canonical)
-            variants.add(phonetic)
-            # ASR can spell the G codeword "gulf". This alternative
-            # still decodes to G, and must match the entire encoded handle;
-            # another codeword or a missing letter is never accepted.
-            variants.add(phonetic.replace("Golf", "Gulf"))
-
         for variant in sorted(
             variants,
             key=len,
@@ -186,3 +177,21 @@ def pronunciation_fingerprint(
     return hashlib.sha256(
         serialized.encode("utf-8")
     ).hexdigest()
+
+
+def unexpected_phonetic_handles(expected: str, actual: str, entries: list[dict]) -> list[str]:
+    """Do not let a small username error disappear in a long chunk's WER."""
+    from chat_pronunciations import phonetic_spelling
+    rejected = []
+    for entry in entries:
+        canonical = str(entry["canonical"])
+        if entry.get("mode") not in ("validated-word-split", "letter-spelling-fallback") or not re.fullmatch(r"[A-Za-z0-9_]+", canonical):
+            continue
+        if not any(re.search(r"(?<!\w)" + re.escape(form) + r"(?!\w)", expected, re.IGNORECASE)
+                   for form in (canonical, str(entry["spokenText"]))):
+            continue
+        words = phonetic_spelling(canonical).split(", ")
+        pattern = r"(?<!\w)" + r"[\W_]+".join(re.escape(word) for word in words) + r"(?!\w)"
+        if re.search(pattern, actual, re.IGNORECASE) and not re.search(pattern, expected, re.IGNORECASE):
+            rejected.append(canonical)
+    return rejected

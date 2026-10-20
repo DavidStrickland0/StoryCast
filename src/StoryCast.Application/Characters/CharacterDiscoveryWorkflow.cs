@@ -1,7 +1,11 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
+using System.Security.Cryptography;
+using System.Text;
 using StoryCast.Application.Attribution;
 using StoryCast.Application.Preparation;
 using StoryCast.Domain.Books;
+using StoryCast.Domain.Characters;
 
 namespace StoryCast.Application.Characters;
 
@@ -71,13 +75,15 @@ public sealed class CharacterDiscoveryWorkflow
     /// The optional chapter to process. When omitted, every chapter is
     /// considered.
     /// </param>
+    /// <param name="dialogueConventions">Book-specific speaker label rules.</param>
     /// <returns>A summary of processed and skipped chapters.</returns>
     public async Task<CharacterDiscoveryWorkflowResult> ExecuteAsync(
         BookProject book,
         CancellationToken cancellationToken = default,
         bool force = false,
         IProgress<CharacterDiscoveryProgress>? progress = null,
-        string? chapterId = null)
+        string? chapterId = null,
+        IReadOnlyList<DialogueConvention>? dialogueConventions = null)
     {
         ArgumentNullException.ThrowIfNull(book);
 
@@ -118,6 +124,50 @@ public sealed class CharacterDiscoveryWorkflow
                 sourceChapter);
 
             var stopwatch = Stopwatch.StartNew();
+
+            // Explicit named message headers are source evidence, even when an
+            // earlier model discovery missed them and cached this chapter.
+            var labeledSpeakers = new List<CharacterProfile>();
+            foreach (var rule in dialogueConventions ?? [])
+            {
+                if (!rule.SpeakerLabelsOverride) continue;
+                var pattern = Regex.Escape(rule.Open.ToString()) +
+                    @"\s*(?<name>(?:(?!" + Regex.Escape(rule.Open.ToString()) + "|" +
+                    Regex.Escape(rule.Close.ToString()) + @")[^\r\n:]){1,150}?)\s*\([^()\r\n]+\)\s*:";
+                foreach (Match match in Regex.Matches(preparedChapter.SpokenText, pattern))
+                {
+                    var name = match.Groups["name"].Value.Trim();
+                    var fullName = match.Value[1..^1].Trim();
+                    if (rule.SpeakerIdsByLabel.Keys.Any(label =>
+                        label.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                        label.Equals(fullName, StringComparison.OrdinalIgnoreCase))) continue;
+                    if ((registry?.Characters ?? []).Concat(labeledSpeakers).Any(character =>
+                        character.Id.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                        character.DisplayName.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                        character.Aliases.Any(alias => alias.Equals(name, StringComparison.OrdinalIgnoreCase)))) continue;
+                    var slug = Regex.Replace(name.ToLowerInvariant(), @"[^a-z0-9]+", "-").Trim('-');
+                    var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(name.ToLowerInvariant())))[..12].ToLowerInvariant();
+                    labeledSpeakers.Add(new CharacterProfile
+                    {
+                        Id = $"message-speaker-{slug}-{hash}", DisplayName = name,
+                        IsNamed = true, Description = "Named participant in a book-configured dialogue message."
+                    });
+                }
+            }
+            if (labeledSpeakers.Count > 0)
+            {
+                // Retain the old hash so adding explicit labels does not skip
+                // model discovery for new or changed prose.
+                var previousHashes = registry?.ProcessedChapterHashes ?? new Dictionary<string, string>();
+                var merged = merger.Merge(registry, book.Id, preparedChapter.ChapterId,
+                    preparedChapter.SourceSha256, labeledSpeakers);
+                registry = new CharacterRegistry
+                {
+                    SchemaVersion = merged.SchemaVersion, BookId = merged.BookId,
+                    Characters = merged.Characters, ProcessedChapterHashes = previousHashes
+                };
+                await registryStore.SaveAsync(book, registry, cancellationToken);
+            }
 
             if (!force && registry is not null &&
                 registry.ProcessedChapterHashes.TryGetValue(

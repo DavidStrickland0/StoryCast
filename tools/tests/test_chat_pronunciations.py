@@ -13,6 +13,15 @@ from spoken_text import normalize_spoken_text
 
 
 class ChatPronunciationTests(unittest.TestCase):
+    def test_existing_uppercase_initials_are_migrated_without_ai(self):
+        with tempfile.TemporaryDirectory() as directory:
+            book = Path(directory)
+            (book / "auto-pronunciations.json").write_text(json.dumps({"entries": [{"canonical": "CM", "spokenText": "CM", "mode": "validated-word-split", "acceptedTranscriptions": ["CM"]}]}))
+            with patch.object(chat.urllib.request, "urlopen") as request:
+                chat.prepare_chat_pronunciations(book, [{"sourceText": "[CM (Earth): Hi]"}], "model", "http://ollama")
+                request.assert_not_called()
+            self.assertEqual("C M", load_pronunciations(book)[0]["spokenText"])
+
     def test_punctuation_only_chat_is_read_literally_without_inventing_dialogue(self):
         self.assertEqual('[User (Earth): three question marks]', normalize_spoken_text('[User (Earth): ???]'))
         self.assertEqual('Really??? [User (Earth): Why???]', normalize_spoken_text('Really??? [User (Earth): Why???]'))

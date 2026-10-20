@@ -428,7 +428,7 @@ internal static class BookProductionCommands
                 };
                 if (args.Contains("--no-ambience", StringComparer.OrdinalIgnoreCase)) chapterArguments.Add("--no-ambience");
                 if (args.Contains("--no-auto-voices", StringComparer.OrdinalIgnoreCase)) chapterArguments.Add("--no-auto-voices");
-                foreach (var option in new[] { "--soundforge-url", "--ambience-gain-db", "--voiceforge", "--voiceforge-image", "--rewrite-model", "--audio-preparation-model" })
+                foreach (var option in new[] { "--soundforge-url", "--ambience-gain-db", "--voiceforge", "--voiceforge-image", "--rewrite-model", "--speech-repair-model", "--audio-preparation-model" })
                 {
                     if (GetOptionValue(args, option) is { } optionValue) chapterArguments.AddRange([option, optionValue]);
                 }

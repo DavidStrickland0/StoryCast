@@ -126,7 +126,8 @@ internal static class CharacterCommands
                 force: force,
                 progress:
                     new CharacterDiscoveryConsoleProgress(),
-                chapterId: chapterId);
+                chapterId: chapterId,
+                dialogueConventions: AudioGenerationSettings.DialogueConventions(bookPath));
 
             Console.WriteLine();
             Console.WriteLine("Character discovery complete.");
