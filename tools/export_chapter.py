@@ -183,6 +183,7 @@ def main() -> int:
         default=DEFAULT_BITRATE,
     )
 
+    parser.add_argument("--ollama-url", default="http://host.docker.internal:11434")
     args = parser.parse_args()
 
     book = args.book.resolve()
@@ -252,7 +253,19 @@ def main() -> int:
         str(mastered_audio),
     ]
 
-    cover_value = manifest.get("cover")
+    from chapter_art import ensure_art, save as save_art
+    artwork = {"status": "disabled"}
+    chapter_cover = None
+    try:
+        chapter_cover = ensure_art(book, args.chapter_id, args.ollama_url)
+        if chapter_cover:
+            artwork = {"status": "ready", "image": str(chapter_cover), "visualReviewRequired": True}
+            (book / "illustrations/pending" / f"{args.chapter_id}.json").unlink(missing_ok=True)
+    except Exception as error:
+        artwork = {"status": "pending", "error": str(error)}
+        save_art(book / "illustrations/pending" / f"{args.chapter_id}.json", artwork)
+        print(f"Chapter illustration pending; exporting narration: {error}", flush=True)
+    cover_value = chapter_cover or manifest.get("cover")
     cover_path: Path | None = None
 
     if cover_value:
@@ -387,6 +400,7 @@ def main() -> int:
             if cover_path is not None
             else None
         ),
+        "illustration": artwork,
         "sourceAudioPath": str(mastered_audio),
         "outputPath": str(output_path),
     }

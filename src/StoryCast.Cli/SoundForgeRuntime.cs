@@ -39,7 +39,8 @@ internal static class SoundForgeRuntime
         if (!settings.Enabled) return;
         var endpoint = new Uri(settings.WorkerUrl);
         var local = endpoint.Host is "host.docker.internal" or "localhost" or "127.0.0.1";
-        var hostUrl = local ? new UriBuilder(endpoint) { Host = "localhost" }.Uri.ToString().TrimEnd('/') : settings.WorkerUrl;
+        var serviceHost = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") == "true" ? "host.docker.internal" : "localhost";
+        var hostUrl = local ? new UriBuilder(endpoint) { Host = serviceHost }.Uri.ToString().TrimEnd('/') : settings.WorkerUrl;
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
         async Task<bool> Healthy()
         {

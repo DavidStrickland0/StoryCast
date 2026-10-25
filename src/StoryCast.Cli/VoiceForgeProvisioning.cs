@@ -135,7 +135,9 @@ internal static class VoiceForgeProvisioning
         var document = File.Exists(verificationPath) ? JsonNode.Parse(await File.ReadAllTextAsync(verificationPath))! : new JsonObject { ["schemaVersion"] = 1, ["voices"] = new JsonArray() };
         var results = document["voices"]!.AsArray();
         if (results.Any(item => item?["voiceId"]?.GetValue<string>() == identity)) throw new InvalidDataException("Voice already exists in verification report.");
-        var staging = Path.Combine(Path.GetDirectoryName(library)!, $".voice-import-{Guid.NewGuid():N}");
+        // The library can itself be a Docker mount. Its parent is then on a
+        // different filesystem, so stage inside the library for atomic rename.
+        var staging = Path.Combine(library, $".voice-import-{Guid.NewGuid():N}");
         Directory.CreateDirectory(staging);
         foreach (var file in new[] { "sample.wav", "voice.json", "generated-verification.json", "audition.wav" }) File.Copy(Path.Combine(candidate, file), Path.Combine(staging, file));
         results.Add(new JsonObject { ["voiceId"] = identity, ["status"] = "pass", ["generatedVerification"] = report.DeepClone() });

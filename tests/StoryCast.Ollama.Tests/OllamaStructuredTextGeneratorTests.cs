@@ -10,6 +10,35 @@ namespace StoryCast.Ollama.Tests;
 /// </summary>
 public sealed class OllamaStructuredTextGeneratorTests
 {
+    [Fact]
+    public async Task GenerateAsync_NormalizesTimeoutButPreservesCallerCancellation()
+    {
+        using var client = new HttpClient(new StubHttpMessageHandler(_ =>
+            Task.FromException<HttpResponseMessage>(new TaskCanceledException("simulated transport timeout"))))
+            { BaseAddress = new Uri("http://localhost:11434"), Timeout = TimeSpan.FromSeconds(7) };
+        var generator = new OllamaStructuredTextGenerator(client, "test");
+        using var schema = JsonDocument.Parse("{}");
+        var timeout = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            generator.GenerateAsync("System", "Prompt", schema.RootElement));
+        Assert.Contains("timed out after 7 seconds", timeout.Message);
+        Assert.IsAssignableFrom<OperationCanceledException>(timeout.InnerException);
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            generator.GenerateAsync("System", "Prompt", schema.RootElement, canceled.Token));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_NormalizesMalformedEnvelope()
+    {
+        using var client = new HttpClient(new StubHttpMessageHandler(_ => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("not JSON") })))
+            { BaseAddress = new Uri("http://localhost:11434") };
+        using var schema = JsonDocument.Parse("{}");
+        await Assert.ThrowsAsync<InvalidDataException>(() => new OllamaStructuredTextGenerator(client, "test")
+            .GenerateAsync("System", "Prompt", schema.RootElement));
+    }
+
     /// <summary>
     /// Verifies the request contract and extracted generated response.
     /// </summary>

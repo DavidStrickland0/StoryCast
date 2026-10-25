@@ -12,6 +12,18 @@ from spoken_text import currency_amounts, normalize_spoken_text
 
 
 class SpokenTextTests(unittest.TestCase):
+    def test_scene_dividers_are_silent_but_equations_are_preserved(self):
+        self.assertEqual("Before.\n\nAfter.", normalize_spoken_text("Before.\n=====\nAfter."))
+        self.assertEqual("A = B", normalize_spoken_text("A = B"))
+
+    def test_ai_is_read_as_letter_names_without_changing_names_or_eye(self):
+        self.assertEqual("The A I spoke. The A I's voice was calm.",
+                         normalize_spoken_text("The AI spoke. The AI's voice was calm."))
+        self.assertEqual("Ai raised an eye. Aiden AIPlayer ai", normalize_spoken_text("Ai raised an eye. Aiden AIPlayer ai"))
+        from verify_voice_library import normalize_words
+        self.assertEqual(normalize_words(normalize_spoken_text("The AI spoke")), normalize_words("The A I spoke"))
+        self.assertNotEqual(normalize_words(normalize_spoken_text("The AI spoke")), normalize_words("The eye spoke"))
+
     def test_vip_is_read_as_letters_without_changing_handles(self):
         self.assertEqual("The V I P entrance. VIPPlayer V I P", normalize_spoken_text("The VIP entrance. VIPPlayer vip"))
 

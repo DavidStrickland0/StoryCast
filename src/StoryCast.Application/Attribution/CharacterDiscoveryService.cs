@@ -105,13 +105,53 @@ public sealed partial class CharacterDiscoveryService
         ArgumentNullException.ThrowIfNull(chapter);
         ArgumentNullException.ThrowIfNull(knownCharacters);
 
-        var knownCharacterSummary = knownCharacters.Select(
+        const int maximumPassageCharacters = 6000;
+        if (chapter.SpokenText.Length <= maximumPassageCharacters)
+            return await DiscoverPassageAsync(chapter, knownCharacters, cancellationToken);
+        var discoveries = new Dictionary<string, CharacterProfile>(StringComparer.OrdinalIgnoreCase);
+        var offset = 0;
+        while (offset < chapter.SpokenText.Length)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var length = Math.Min(maximumPassageCharacters, chapter.SpokenText.Length - offset);
+            if (offset + length < chapter.SpokenText.Length)
+            {
+                var boundary = chapter.SpokenText.LastIndexOf('\n', offset + length - 1, length);
+                if (boundary >= offset + length / 2) length = boundary - offset + 1;
+            }
+            var passage = new PreparedChapter { ChapterId = chapter.ChapterId, SourcePath = chapter.SourcePath,
+                SourceSha256 = chapter.SourceSha256, PreparationVersion = chapter.PreparationVersion,
+                SpokenText = chapter.SpokenText.Substring(offset, length) };
+            Console.WriteLine($"Character discovery passage {offset + 1}-{offset + length}/{chapter.SpokenText.Length}");
+            var known = knownCharacters.ToDictionary(item => item.Id, StringComparer.OrdinalIgnoreCase);
+            foreach (var item in discoveries.Values) known[item.Id] = item;
+            foreach (var item in await DiscoverPassageAsync(passage, known.Values.ToArray(), cancellationToken,
+                         discoveries.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase),
+                         offset == 0 ? "" : chapter.SpokenText.Substring(Math.Max(0, offset - 600), Math.Min(600, offset))))
+                discoveries[item.Id] = item;
+            offset += length;
+        }
+        return discoveries.Values.ToArray();
+    }
+
+    private async Task<IReadOnlyList<CharacterProfile>> DiscoverPassageAsync(PreparedChapter chapter,
+        IReadOnlyList<CharacterProfile> knownCharacters, CancellationToken cancellationToken,
+        IReadOnlySet<string>? carriedIdentities = null, string previousContext = "")
+    {
+
+        // Keep the complete registry for identity validation, but do not fill a
+        // small local model's context with unrelated characters from other chapters.
+        var relevant = knownCharacters.Where(character => character.IsNarrator || carriedIdentities?.Contains(character.Id) == true ||
+            character.Aliases.Append(character.DisplayName).Any(name => !string.IsNullOrWhiteSpace(name) &&
+                Regex.IsMatch(chapter.SpokenText, @"(?<!\w)" + Regex.Escape(name) + @"(?!\w)", RegexOptions.IgnoreCase))).ToArray();
+        Console.WriteLine($"Character discovery context: {relevant.Length}/{knownCharacters.Count} saved identities, {chapter.SpokenText.Length} source characters.");
+        var knownCharacterSummary = relevant.Select(
             character => new
             {
                 character.Id,
                 character.DisplayName,
                 character.Aliases,
-                character.Description,
+                Description = character.Description.Length <= 240 ? character.Description : character.Description[..240],
                 character.VoicePresentation,
                 character.IsNamed,
                 character.IsNarrator
@@ -126,6 +166,9 @@ public sealed partial class CharacterDiscoveryService
 
             Chapter ID:
             {chapter.ChapterId}
+
+            Previous passage context (identity continuity only; discover speakers from Chapter text below):
+            {previousContext}
 
             Chapter text:
             <chapter>
@@ -183,6 +226,13 @@ public sealed partial class CharacterDiscoveryService
                 userPrompt = originalPrompt + "\nYour previous response was invalid: " + exception.Message +
                     "\nReturn a complete corrected character list. Use each ID once. " +
                     "Merge repeated entries for the same speaker; use distinct IDs for distinct speakers.";
+            }
+            catch (HttpRequestException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                Console.WriteLine($"Character discovery transport attempt {attempt}/3: {exception.Message}");
+                if (attempt == 3)
+                    throw new IOException("Character discovery could not reach a usable Ollama response after three bounded attempts; chapter progress is preserved.", exception);
+                userPrompt = originalPrompt;
             }
         }
         throw new InvalidOperationException("Character discovery attempts exhausted.");

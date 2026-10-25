@@ -143,7 +143,8 @@ def runtime_identity(device, torch):
     tools = Path(__file__).parent
     for filename in ('synthesize_chapter_probe.py', 'shared_audio_cache.py', 'audio_postprocessing.py',
                      'prosody.py', 'delivery_planning.py', 'pronunciations.py', 'spoken_text.py',
-                     'context_pronunciations.py', 'heading_pauses.py', 'synthesis_chunking.py', 'chat_label_recovery.py'):
+                     'context_pronunciations.py', 'heading_pauses.py', 'synthesis_chunking.py', 'chat_label_recovery.py',
+                     'chatterbox_safety.py'):
         code['tools/' + filename] = digest_file(tools / filename)
     versions = {name: importlib.metadata.version(name) for name in ('torch', 'torchaudio', 'numpy', 'chatterbox-tts')}
     return dict(codeSha256=identity(code), packages=versions, device=str(device),

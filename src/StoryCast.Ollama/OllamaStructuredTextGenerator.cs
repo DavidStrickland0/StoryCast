@@ -73,36 +73,49 @@ public sealed class OllamaStructuredTextGenerator
             }
         };
 
-        using var response = await httpClient.PostAsJsonAsync(
-            "api/generate",
-            request,
-            SerializerOptions,
-            cancellationToken);
-
-        var responseBody = await response.Content.ReadAsStringAsync(
-            cancellationToken);
-
-        if (!response.IsSuccessStatusCode)
+        try
         {
-            throw new HttpRequestException(
-                $"Ollama returned HTTP {(int)response.StatusCode}: " +
+            using var response = await httpClient.PostAsJsonAsync(
+                "api/generate",
+                request,
+                SerializerOptions,
+                cancellationToken);
+
+            var responseBody = await response.Content.ReadAsStringAsync(
+                cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new HttpRequestException(
+                    $"Ollama returned HTTP {(int)response.StatusCode}: " +
+                    responseBody,
+                    inner: null,
+                    response.StatusCode);
+            }
+
+            var result = JsonSerializer.Deserialize<GenerateResponse>(
                 responseBody,
-                inner: null,
-                response.StatusCode);
+                SerializerOptions);
+
+            if (result is null ||
+                string.IsNullOrWhiteSpace(result.Response))
+            {
+                throw new InvalidDataException(
+                    "Ollama returned an empty structured response.");
+            }
+
+            return result.Response;
         }
-
-        var result = JsonSerializer.Deserialize<GenerateResponse>(
-            responseBody,
-            SerializerOptions);
-
-        if (result is null ||
-            string.IsNullOrWhiteSpace(result.Response))
+        catch (JsonException exception)
         {
-            throw new InvalidDataException(
-                "Ollama returned an empty structured response.");
+            throw new InvalidDataException("Ollama returned an invalid JSON response envelope.", exception);
         }
-
-        return result.Response;
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // HttpClient timeouts are transport failures, not user cancellation.
+            // Normalize them so callers can bound retries and persist chapter outcomes.
+            throw new HttpRequestException($"Ollama request for '{model}' timed out after {httpClient.Timeout.TotalSeconds:F0} seconds.", exception);
+        }
     }
 
     private sealed class GenerateRequest

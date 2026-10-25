@@ -97,13 +97,13 @@ internal static class CharacterCommands
                     ollamaUrl,
                     UriKind.Absolute),
 
-                Timeout = TimeSpan.FromMinutes(30)
+                Timeout = TimeSpan.FromMinutes(3)
             };
 
             var generator =
                 new OllamaStructuredTextGenerator(
                     httpClient,
-                    model);
+                    model, contextLength: 16384, maximumOutputTokens: 4096);
 
             var workflow =
                 new CharacterDiscoveryWorkflow(
@@ -148,6 +148,7 @@ internal static class CharacterCommands
         catch (Exception exception) when (
             exception is IOException or
             HttpRequestException or
+            OperationCanceledException or
             UnauthorizedAccessException or
             UriFormatException or
             InvalidDataException)

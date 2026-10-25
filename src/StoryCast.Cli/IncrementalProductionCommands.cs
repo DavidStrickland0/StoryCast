@@ -406,6 +406,7 @@ internal static class IncrementalProductionCommands
             InvalidDataException or
             UnauthorizedAccessException or
             HttpRequestException or
+            OperationCanceledException or
             JsonException)
         {
             if (state is not null &&

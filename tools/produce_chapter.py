@@ -1950,6 +1950,12 @@ def main() -> int:
             report["ambienceReportPath"] = str(ambience_report)
 
         current_stage = "MP3 export"
+        artwork_inputs = [tools_directory / "chapter_art.py"]
+        art_config = book / "production" / "illustrations.json"
+        if art_config.is_file():
+            artwork_inputs.append(art_config)
+        artwork_inputs.extend(sorted((book / "illustrations").rglob("*.json")))
+        artwork_inputs.extend(sorted((book / "illustrations").rglob("*.jpg")))
 
         run_checkpointed_stage(
             "MP3 export",
@@ -1962,6 +1968,7 @@ def main() -> int:
                 mastered_verification_path,
                 tools_directory /
                 "export_chapter.py",
+                *artwork_inputs,
             ],
             {
                 "bitrate": "64k",
@@ -1985,10 +1992,12 @@ def main() -> int:
                     str(export_audio),
                     "--bitrate",
                     "64k",
+                    "--ollama-url", args.ollama_url,
                 ],
             ),
         )
 
+        report["illustration"] = load_json(export_report_path).get("illustration", {"status": "disabled"})
         report["status"] = "completed"
         report["completedUtc"] = (
             datetime.now(

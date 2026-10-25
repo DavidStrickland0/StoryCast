@@ -1,0 +1,10 @@
+FROM storycast-worker:dev
+USER root
+# Isolate image dependencies from Chatterbox and its pinned NumPy environment.
+RUN python3.12 -m venv /opt/illustrations && echo /opt/storycast/lib/python3.12/site-packages > /opt/illustrations/lib/python3.12/site-packages/storycast.pth
+RUN /opt/illustrations/bin/python -m pip install --no-cache-dir "diffusers==0.41.0" "transformers==5.8.1" "accelerate==1.13.0" "huggingface-hub>=1.7.1" "Pillow==12.3.0" sentencepiece protobuf
+COPY tools/illustration_renderer.py /app/illustration_renderer.py
+ENV HF_HOME=/models/huggingface PYTHONUNBUFFERED=1 HF_HUB_DISABLE_XET=1
+EXPOSE 7862
+ENTRYPOINT ["/opt/illustrations/bin/python"]
+CMD ["/app/illustration_renderer.py"]

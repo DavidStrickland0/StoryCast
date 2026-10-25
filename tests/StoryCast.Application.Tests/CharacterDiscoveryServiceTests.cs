@@ -11,6 +11,50 @@ namespace StoryCast.Application.Tests.Attribution;
 /// </summary>
 public sealed class CharacterDiscoveryServiceTests
 {
+    [Fact]
+    public async Task DiscoverAsync_BoundsPassagesAndKeepsFullSourceInOrder()
+    {
+        var source = string.Concat(Enumerable.Repeat("Miller said hello.\n", 1000));
+        var chapter = new PreparedChapter { ChapterId = "chapter-099", SourcePath = "source.txt",
+            SourceSha256 = new string('a', 64), PreparationVersion = "1", SpokenText = source };
+        var passages = new List<string>();
+        var generator = new CallbackGenerator((_, prompt) =>
+        {
+            var text = prompt.Replace("\r\n", "\n").Split("<chapter>\n", StringSplitOptions.None)[1].Split("\n</chapter>", StringSplitOptions.None)[0];
+            Assert.True(text.Length <= 6000);
+            Assert.Contains("miller", prompt);
+            Assert.DoesNotContain("Unrelated999", prompt);
+            passages.Add(text);
+            return "{\"characters\":[]}";
+        });
+        var known = Enumerable.Range(0, 1000).Select(i => new CharacterProfile { Id = $"other-{i}", DisplayName = $"Unrelated{i}" })
+            .Append(new CharacterProfile { Id = "miller", DisplayName = "Miller", IsNamed = true }).ToArray();
+        Assert.Empty(await new CharacterDiscoveryService(generator).DiscoverAsync(chapter, known));
+        Assert.True(passages.Count > 1);
+        Assert.Equal(source, string.Concat(passages));
+    }
+
+    [Fact]
+    public async Task DiscoverAsync_RetriesTransportWithinBudgetAndDoesNotSwallowCancellation()
+    {
+        var calls = 0;
+        var recovered = new CallbackGenerator((_, _) => ++calls < 3 ? throw new HttpRequestException("timeout") : "{\"characters\":[]}");
+        Assert.Empty(await new CharacterDiscoveryService(recovered).DiscoverAsync(CreateChapter(), []));
+        Assert.Equal(3, calls);
+        calls = 0;
+        var failed = new CallbackGenerator((_, _) => { calls++; throw new HttpRequestException("timeout"); });
+        await Assert.ThrowsAsync<IOException>(() => new CharacterDiscoveryService(failed).DiscoverAsync(CreateChapter(), []));
+        Assert.Equal(3, calls);
+        var canceled = new CallbackGenerator((_, _) => throw new OperationCanceledException());
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new CharacterDiscoveryService(canceled).DiscoverAsync(CreateChapter(), []));
+    }
+
+    private sealed class CallbackGenerator(Func<string, string, string> action) : IStructuredTextGenerator
+    {
+        public Task<string> GenerateAsync(string systemPrompt, string userPrompt, JsonElement jsonSchema, CancellationToken cancellationToken = default)
+            => Task.FromResult(action(systemPrompt, userPrompt));
+    }
+
     /// <summary>Repeated explicit handles can converge on one legacy identity.</summary>
     [Fact]
     public async Task DiscoverAsync_CoalescesCanonicalChatHandleMetadata()

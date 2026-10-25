@@ -626,6 +626,8 @@ def main(
 
     if segments:
         if _CACHED_MODEL is None:
+            from chatterbox_safety import configure_speech_token_guard
+            configure_speech_token_guard()
             from cache_tokenizer import configure_tokenizer_cache
             configure_tokenizer_cache()
 

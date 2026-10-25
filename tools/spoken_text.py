@@ -113,6 +113,9 @@ def year_to_words(value: int) -> str:
 
 def normalize_spoken_text(text: str) -> str:
     """Normalize synthesis punctuation and expand unstable numeric forms."""
+    # Scene dividers are layout, not speech. Feeding them to TTS can produce
+    # invented words or invalid speech tokens. Keep prose/equations intact.
+    text = re.sub(r"(?m)^[ \t]*={3,}[ \t]*$", "", text)
     text = text.translate(str.maketrans({"\u2019": "'", "\u2018": "'"}))
     # Read punctuation-only chat reactions literally instead of inventing a
     # response or leaving a username followed by unpronounceable punctuation.
@@ -155,7 +158,8 @@ def normalize_spoken_text(text: str) -> str:
 
         return spoken
 
-    # OS is an initialism. Match uppercase only so ordinary prose is untouched.
+    # AI and OS are initialisms. Match uppercase only to preserve names such as Ai.
+    text = re.sub(r"(?<!\w)AI(?!\w)", "A I", text)
     text = re.sub(r"(?<!\w)OS(?!\w)", "O S", text)
     # Identification is pronounced as letter names, not the contraction I'd.
     # Match uppercase only and leave words/handles containing ID untouched.

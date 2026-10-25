@@ -113,6 +113,7 @@ internal static class ProductionCommands
             if (await CastingCommands.AssignAsync(castingArguments.ToArray()) != 0)
                 throw new InvalidDataException("Chapter audio requires a verified casting plan matching the character attributes.");
             await SoundForgeRuntime.EnsureAsync(ambience);
+            await IllustrationRuntime.EnsureAsync(bookPath);
 
             if (!Directory.Exists(bookPath))
             {
