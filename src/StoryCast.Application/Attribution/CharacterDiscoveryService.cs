@@ -370,12 +370,17 @@ public sealed partial class CharacterDiscoveryService
             if (!returnedIds.Add(normalizedId))
             {
                 var previous = profiles.Single(profile => string.Equals(profile.Id, normalizedId, StringComparison.OrdinalIgnoreCase));
-                if (explicitChatHandle && previous.DisplayName.Equals(candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase) &&
-                    previous.IsNarrator == candidate.IsNarrator &&
+                var sameKnownIdentity = hasExistingCharacter && existing!.IsNamed && previous.IsNamed &&
+                    existing.Aliases.Append(existing.DisplayName).Any(name =>
+                        string.Equals(name.Trim(), previous.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase)) &&
+                    existing.Aliases.Append(existing.DisplayName).Any(name =>
+                        string.Equals(name.Trim(), candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase));
+                if ((sameKnownIdentity || (explicitChatHandle && previous.DisplayName.Equals(candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase))) &&
+                    (sameKnownIdentity || previous.IsNarrator == candidate.IsNarrator) &&
                     (previous.VoicePresentation == presentation || previous.VoicePresentation == "unspecified" || presentation == "unspecified"))
                 {
-                    // Canonicalizing legacy chapter-scoped handles can turn
-                    // multiple generated entries into the same known person.
+                    // Known aliases and legacy chapter-scoped handles can turn
+                    // multiple generated entries into the same established person.
                     // Descriptive differences do not create a new identity.
                     profiles[profiles.IndexOf(previous)] = new CharacterProfile
                     {
@@ -384,7 +389,7 @@ public sealed partial class CharacterDiscoveryService
                         Description = previous.Description,
                         VoiceTraits = NormalizeVoiceTraits(previous.VoiceTraits.Concat(candidate.VoiceTraits).ToArray()),
                         VoicePresentation = previous.VoicePresentation == "unspecified" ? presentation : previous.VoicePresentation,
-                        IsNamed = true, IsNarrator = previous.IsNarrator,
+                        IsNamed = true, IsNarrator = sameKnownIdentity ? existing!.IsNarrator : previous.IsNarrator,
                         Importance = previous.Importance > importance ? previous.Importance : importance
                     };
                     continue;

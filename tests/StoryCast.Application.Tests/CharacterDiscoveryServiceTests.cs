@@ -11,6 +11,26 @@ namespace StoryCast.Application.Tests.Attribution;
 /// </summary>
 public sealed class CharacterDiscoveryServiceTests
 {
+    /// <summary>Repeated established aliases coalesce without dropping conflicting identities.</summary>
+    /// <returns>The asynchronous test operation.</returns>
+    [Fact]
+    public async Task DiscoverAsync_CoalescesRepeatedEstablishedNamedCharacter()
+    {
+        var first = new { id = "jin-rou", displayName = "Jin Rou", aliases = new[] { "Rou" },
+            description = "Cultivator", voiceTraits = new[] { "steady" }, voicePresentation = "unspecified",
+            isNamed = true, importance = "major", isNarrator = false };
+        var second = first with { displayName = "Rou", aliases = new[] { "Young Master" }, voiceTraits = new[] { "clear" }, isNarrator = true };
+        var generator = new StubStructuredTextGenerator(JsonSerializer.Serialize(new { characters = new[] { first, second } }));
+        var known = new CharacterProfile { Id = "jin-rou", DisplayName = "Jin Rou", Aliases = ["Rou"], IsNamed = true, IsNarrator = true };
+        var result = await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), [known]);
+        var character = Assert.Single(result);
+        Assert.Equal("jin-rou", character.Id);
+        Assert.Contains("Young Master", character.Aliases);
+        Assert.Contains("steady", character.VoiceTraits);
+        Assert.Contains("clear", character.VoiceTraits);
+        Assert.True(character.IsNarrator);
+    }
+
     [Fact]
     public async Task DiscoverAsync_BoundsPassagesAndKeepsFullSourceInOrder()
     {
