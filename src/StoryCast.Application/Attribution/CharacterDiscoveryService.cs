@@ -59,6 +59,11 @@ public sealed partial class CharacterDiscoveryService
         documents, signs, memories without speech, or a normal third-person
         narrator.
 
+        The production narrator is managed separately. Never return the reserved
+        ID narrator or copy it from Known characters. For a first-person narrator
+        who is also a story character, use that person's actual character identity
+        and name instead of creating a generic narrator character.
+
         Voice presentation must be male, female, or unspecified. Use male
         or female only when pronouns or explicit description provide clear
         evidence referring to this character. Names alone are not evidence.
@@ -105,7 +110,9 @@ public sealed partial class CharacterDiscoveryService
         ArgumentNullException.ThrowIfNull(chapter);
         ArgumentNullException.ThrowIfNull(knownCharacters);
 
-        var knownCharacterSummary = knownCharacters.Select(
+        var knownCharacterSummary = knownCharacters
+            .Where(character => !string.Equals(character.Id, "narrator", StringComparison.OrdinalIgnoreCase))
+            .Select(
             character => new
             {
                 character.Id,
@@ -222,11 +229,13 @@ public sealed partial class CharacterDiscoveryService
                     $"'{candidateId}'.");
             }
 
+            if (string.Equals(candidateId, "narrator", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine("Ignoring the production narrator returned by character discovery; retaining its existing voice assignment.");
+                continue;
+            }
+
             if (string.Equals(
-                    candidateId,
-                    "narrator",
-                    StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(
                     candidateId,
                     ProductionScriptSegmenter.UnassignedSpeakerId,
                     StringComparison.OrdinalIgnoreCase))
