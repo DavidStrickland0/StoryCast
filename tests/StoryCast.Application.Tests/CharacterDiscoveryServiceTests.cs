@@ -98,6 +98,38 @@ public sealed class CharacterDiscoveryServiceTests
         if (existing) Assert.Equal("chapter-013-justiceistruth", character.Id);
     }
 
+    /// <summary>The reserved production narrator cannot block discovery or replace existing casting.</summary>
+    /// <returns>The asynchronous test operation.</returns>
+    [Fact]
+    public async Task DiscoverAsync_ProductionNarrator_IsExcludedWithoutRetry()
+    {
+        var narrator = new { id = "narrator", displayName = "Narrator", aliases = Array.Empty<string>(),
+            description = "Tells the story", voiceTraits = Array.Empty<string>(), voicePresentation = "male",
+            isNamed = false, importance = "major", isNarrator = true };
+        var maren = narrator with { id = "maren", displayName = "Maren", isNamed = true, isNarrator = false };
+        var generator = new StubStructuredTextGenerator(JsonSerializer.Serialize(new { characters = new[] { narrator, maren } }));
+        var knownNarrator = new CharacterProfile { Id = "narrator", DisplayName = "Narrator", Description = "Tells the story", IsNarrator = true };
+        var result = await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), [knownNarrator]);
+        Assert.Equal("maren", Assert.Single(result).Id);
+        Assert.Equal(1, generator.Calls);
+        Assert.DoesNotContain("Tells the story", generator.UserPrompt, StringComparison.Ordinal);
+        Assert.True(knownNarrator.IsNarrator);
+    }
+
+    /// <summary>First-person story characters keep their own identities and narration role.</summary>
+    /// <returns>The asynchronous test operation.</returns>
+    [Fact]
+    public async Task DiscoverAsync_FirstPersonCharacter_PreservesIdentity()
+    {
+        var candidate = new { id = "elias", displayName = "Elias", aliases = Array.Empty<string>(),
+            description = "Tells his own story", voiceTraits = Array.Empty<string>(), voicePresentation = "unspecified",
+            isNamed = true, importance = "major", isNarrator = true };
+        var generator = new StubStructuredTextGenerator(JsonSerializer.Serialize(new { characters = new[] { candidate } }));
+        var result = await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), []);
+        Assert.Equal("elias", Assert.Single(result).Id);
+        Assert.True(result[0].IsNarrator);
+    }
+
     [Theory]
     [InlineData("female", "male", "female")]
     [InlineData("male", "female", "male")]
@@ -286,8 +318,8 @@ public sealed class CharacterDiscoveryServiceTests
             {
               "characters": [
                 {
-                  "id": "narrator",
-                  "displayName": "Narrator",
+                  "id": "unassigned",
+                  "displayName": "Unassigned",
                   "aliases": [],
                   "description": "",
                   "voiceTraits": [],
