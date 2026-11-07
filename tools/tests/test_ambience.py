@@ -11,6 +11,34 @@ import ambience
 
 
 class AmbienceTests(unittest.TestCase):
+    def test_transport_failure_retries_and_records_optional_omissions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / 'chapter.json'
+            ambience.save(manifest, dict(segments=self.segments()))
+            with patch.object(ambience, 'request_json', side_effect=RuntimeError('HTTP 500: token repeat limit reached')) as request:
+                self.assertEqual([], ambience.plan_ambience(manifest, 'model', 'http://ollama'))
+            self.assertEqual(3, request.call_count)
+            plan = ambience.load(manifest.parent / 'ambience-plan.json')
+            self.assertIn('HTTP 500', plan['warnings'][0])
+            temperatures = [call.args[1]['options']['temperature'] for call in request.call_args_list]
+            self.assertEqual(3, len(set(temperatures)))
+
+    def test_transient_transport_failure_can_recover_without_losing_valid_cues(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / 'chapter.json'
+            ambience.save(manifest, dict(segments=self.segments()))
+            response = {'response': json.dumps({'cues': [self.cue()]})}
+            with patch.object(ambience, 'request_json', side_effect=[RuntimeError('HTTP 500'), response]) as request:
+                self.assertEqual(ambience.validate_cues([self.cue()], self.segments()),
+                                 ambience.plan_ambience(manifest, 'model', 'http://ollama'))
+            self.assertEqual(2, request.call_count)
+            self.assertEqual([], ambience.load(manifest.parent / 'ambience-plan.json')['warnings'])
+
+    def test_wrapped_evidence_still_requires_exact_source(self):
+        for quote in ('"Rain fell on leaves."', '“Rain fell on leaves.”', "'Rain fell on leaves.'"):
+            self.assertTrue(ambience.supported_evidence(quote, 'Rain fell on leaves.'))
+        self.assertFalse(ambience.supported_evidence('"Ocean waves crashed."', 'Rain fell on leaves.'))
+
     def test_unrepairable_cue_does_not_block_chapter_or_discard_valid_cue(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = Path(temporary) / "chapter.json"

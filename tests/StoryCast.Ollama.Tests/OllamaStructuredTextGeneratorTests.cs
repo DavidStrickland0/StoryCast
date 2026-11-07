@@ -10,6 +10,33 @@ namespace StoryCast.Ollama.Tests;
 /// </summary>
 public sealed class OllamaStructuredTextGeneratorTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task GenerateAsync_RecoversRepetitionWithChangedSamplingWithinBudget(bool recovers)
+    {
+        var requests = new List<JsonElement>();
+        using var client = new HttpClient(new StubHttpMessageHandler(async request =>
+        {
+            requests.Add(JsonDocument.Parse(await request.Content!.ReadAsStringAsync()).RootElement.Clone());
+            return new HttpResponseMessage(recovers && requests.Count == 2 ? HttpStatusCode.OK : HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent(recovers && requests.Count == 2
+                    ? "{\"response\":\"{\\\"characters\\\":[]}\"}"
+                    : "{\"error\":\"prediction aborted, token repeat limit reached\"}")
+            };
+        })) { BaseAddress = new Uri("http://localhost:11434") };
+        using var schema = JsonDocument.Parse("{\"type\":\"object\"}");
+        var generator = new OllamaStructuredTextGenerator(client, "test");
+        if (recovers) Assert.Equal("{\"characters\":[]}", await generator.GenerateAsync("System", "Source", schema.RootElement));
+        else await Assert.ThrowsAsync<HttpRequestException>(() => generator.GenerateAsync("System", "Source", schema.RootElement));
+        Assert.Equal(2, requests.Count);
+        Assert.Equal(0, requests[0].GetProperty("options").GetProperty("temperature").GetDouble());
+        Assert.Equal(0.3, requests[1].GetProperty("options").GetProperty("temperature").GetDouble());
+        Assert.Equal(requests[0].GetProperty("prompt").GetString(), requests[1].GetProperty("prompt").GetString());
+        Assert.Equal(requests[0].GetProperty("format").GetRawText(), requests[1].GetProperty("format").GetRawText());
+    }
+
     [Fact]
     public async Task GenerateAsync_NormalizesTimeoutButPreservesCallerCancellation()
     {

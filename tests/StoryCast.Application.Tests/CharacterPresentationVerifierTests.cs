@@ -21,6 +21,30 @@ public sealed class CharacterPresentationVerifierTests
     }
 
     [Fact]
+    public async Task RejectsFemaleObjectPronounForThePersonApproaching()
+    {
+        const string text = "Neolu approached her.";
+        var generator = new Generator(JsonSerializer.Serialize(new { characters = new[] {
+            new { id = "student", presentation = "female", evidence = new[] { text } } } }));
+        var result = await new CharacterPresentationVerifier(generator).VerifyAsync(text,
+            [new() { Id = "student", DisplayName = "Neolu" }]);
+        Assert.Equal("unspecified", result["student"]);
+    }
+
+    [Theory]
+    [InlineData("Neolu approached him one day and gave him a list of books he might find useful.")]
+    [InlineData("Zorian was annoyed. His displeasure evaporated when Neolu approached him.")]
+    [InlineData("He laughed. Neolu recommended books about making sure your letters could not be traced.")]
+    public async Task RejectsPronounsBelongingToThePersonApproached(string text)
+    {
+        var generator = new Generator(JsonSerializer.Serialize(new { characters = new[] {
+            new { id = "student", presentation = "male", evidence = new[] { text } } } }));
+        var result = await new CharacterPresentationVerifier(generator).VerifyAsync(text,
+            [new() { Id = "student", DisplayName = "Neolu" }]);
+        Assert.Equal("unspecified", result["student"]);
+    }
+
+    [Fact]
     public async Task IndependentlyChecksEveryIdentityWithoutSeeingProposedPresentations()
     {
         var generator = new Generator("""

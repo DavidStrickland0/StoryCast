@@ -207,10 +207,13 @@ public sealed class CharacterRegistryMerger
                 ? discovery.Description.Trim()
                 : existing.Description,
             VoiceTraits = voiceTraits,
-            VoicePresentation = MergePresentation(
+            VoicePresentation = discovery.VoicePresentationEvidence.Count > 0 && discovery.VoicePresentation is "male" or "female"
+                ? discovery.VoicePresentation : MergePresentation(
                 existing.VoicePresentation,
                 discovery.VoicePresentation,
                 existing.Id),
+            VoicePresentationEvidence = discovery.VoicePresentationEvidence.Count > 0
+                ? discovery.VoicePresentationEvidence : existing.VoicePresentationEvidence,
             IsNamed =
                 existing.IsNamed || discovery.IsNamed,
             Importance = MaxImportance(
@@ -241,6 +244,7 @@ public sealed class CharacterRegistryMerger
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
             VoicePresentation = character.VoicePresentation,
+            VoicePresentationEvidence = character.VoicePresentationEvidence,
             IsNamed = character.IsNamed,
             Importance = character.Importance,
             IsNarrator = character.IsNarrator

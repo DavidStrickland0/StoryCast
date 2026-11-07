@@ -32,6 +32,53 @@ public sealed class CharacterDiscoveryServiceTests
     }
 
     [Fact]
+    public async Task DiscoverAsync_SourceEvidenceCorrectsSavedPresentationAndPersistsThroughMerge()
+    {
+        const string source = "Neolu lifted her hand.";
+        var known = new CharacterProfile { Id = "student", DisplayName = "Neolu", VoicePresentation = "male" };
+        var generator = new CallbackGenerator((system, _) => system.StartsWith("Independently verify")
+            ? JsonSerializer.Serialize(new { characters = new[] { new { id = "student", presentation = "female", evidence = new[] { source } } } })
+            : JsonSerializer.Serialize(new { characters = new[] { new { id = "student", displayName = "Neolu", aliases = Array.Empty<string>(),
+                description = "Student", voiceTraits = Array.Empty<string>(), voicePresentation = "male", isNamed = true,
+                importance = "minor", isNarrator = false } } }));
+        var chapter = new PreparedChapter { ChapterId = "chapter-025", SourcePath = "source.txt",
+            SourceSha256 = new string('a', 64), PreparationVersion = "1", SpokenText = source };
+        var discovery = await new CharacterDiscoveryService(generator).DiscoverAsync(chapter, [known]);
+        var registry = new CharacterRegistry { SchemaVersion = 1, BookId = "test", Characters = [known],
+            ProcessedChapterHashes = new Dictionary<string, string>() };
+        var merged = new CharacterRegistryMerger().Merge(registry, "test", chapter.ChapterId, chapter.SourceSha256, discovery);
+        var profile = Assert.Single(merged.Characters);
+        Assert.Equal("student", profile.Id);
+        Assert.Equal("female", profile.VoicePresentation);
+        Assert.Equal(source, Assert.Single(profile.VoicePresentationEvidence));
+    }
+
+    [Fact]
+    public async Task DiscoverAsync_SplitsRepetitivePassagesWithoutLosingSource()
+    {
+        var source = string.Concat(Enumerable.Repeat("Miller said hello.\n", 200));
+        var accepted = new List<string>();
+        var failures = 0;
+        var generator = new CallbackGenerator((_, prompt) =>
+        {
+            var text = prompt.Replace("\r\n", "\n").Split("<chapter>\n", StringSplitOptions.None)[1].Split("\n</chapter>", StringSplitOptions.None)[0];
+            if (text.Length > 1500)
+            {
+                failures++;
+                throw new HttpRequestException("prediction aborted, token repeat limit reached");
+            }
+            accepted.Add(text);
+            return "{\"characters\":[]}";
+        });
+        var chapter = new PreparedChapter { ChapterId = "chapter-004", SourcePath = "source.txt",
+            SourceSha256 = new string('a', 64), PreparationVersion = "1", SpokenText = source };
+        Assert.Empty(await new CharacterDiscoveryService(generator).DiscoverAsync(chapter, []));
+        Assert.Equal(source, string.Concat(accepted));
+        Assert.Equal(3, failures);
+        Assert.Equal(4, accepted.Count);
+    }
+
+    [Fact]
     public async Task DiscoverAsync_BoundsPassagesAndKeepsFullSourceInOrder()
     {
         var source = string.Concat(Enumerable.Repeat("Miller said hello.\n", 1000));
@@ -191,6 +238,77 @@ public sealed class CharacterDiscoveryServiceTests
         var result = await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), []);
         Assert.Equal("chapter-001-news-presenter-01", Assert.Single(result).Id);
         Assert.Equal(1, generator.Calls);
+    }
+
+    /// <summary>Repeated named identities merge descriptive metadata without another discovery request.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiscoverAsync_MergesCompatibleNamedDuplicates(bool alreadyKnown)
+    {
+        var first = new { id = "aranea", displayName = "Aranea", aliases = new[] { "Spider" },
+            description = "A speaking spider.", voiceTraits = new[] { "calm" }, voicePresentation = "unspecified",
+            isNamed = true, importance = "minor", isNarrator = false };
+        var second = first with { displayName = "ARANEA", aliases = new[] { "Teacher" },
+            description = "A patient teacher.", voiceTraits = new[] { "precise" },
+            voicePresentation = "female", importance = "major" };
+        var generator = new StubStructuredTextGenerator(JsonSerializer.Serialize(new { characters = new[] { first, second } }));
+        CharacterProfile[] known = alreadyKnown
+            ? [new CharacterProfile { Id = "aranea", DisplayName = "Aranea", IsNamed = true }]
+            : [];
+        var result = await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), known);
+        var profile = Assert.Single(result);
+        Assert.Equal("aranea", profile.Id);
+        Assert.Contains("Spider", profile.Aliases);
+        Assert.Contains("Teacher", profile.Aliases);
+        Assert.Contains("calm", profile.VoiceTraits);
+        Assert.Contains("precise", profile.VoiceTraits);
+        // The separate evidence verifier leaves unsupported presentation unspecified.
+        Assert.Equal("unspecified", profile.VoicePresentation);
+        Assert.Equal(CharacterImportance.Major, profile.Importance);
+        Assert.Equal(1, generator.Calls);
+    }
+
+    /// <summary>Shared generic names do not prevent discovery of a chapter-local copy.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiscoverAsync_AmbiguousUnnamedRoleRemainsChapterScoped(bool isNamed)
+    {
+        var candidate = new { id = "simulacrum-03", displayName = "Simulacrum", aliases = Array.Empty<string>(),
+            description = "A speaking copy.", voiceTraits = Array.Empty<string>(), voicePresentation = "unspecified",
+            isNamed, importance = "minor", isNarrator = false };
+        var generator = new StubStructuredTextGenerator(JsonSerializer.Serialize(new { characters = new[] { candidate } }));
+        CharacterProfile[] known = [
+            new() { Id = "copy-one", DisplayName = "Simulacrum", IsNamed = true },
+            new() { Id = "copy-two", DisplayName = "Simulacrum", IsNamed = true }];
+        if (isNamed)
+        {
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), known));
+            Assert.Contains("ambiguously matches", error.Message);
+            return;
+        }
+        var profile = Assert.Single(await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), known));
+        Assert.Equal("chapter-001-simulacrum-03", profile.Id);
+        Assert.False(profile.IsNamed);
+        Assert.Equal(1, generator.Calls);
+    }
+
+    /// <summary>An exact display name wins over another character's shared alias.</summary>
+    [Fact]
+    public async Task DiscoverAsync_PrefersUniqueExactNameOverSharedAlias()
+    {
+        var candidate = new { id = "new-copy", displayName = "Simulacrum", aliases = Array.Empty<string>(),
+            description = "A speaking copy.", voiceTraits = Array.Empty<string>(), voicePresentation = "unspecified",
+            isNamed = false, importance = "minor", isNarrator = false };
+        var generator = new StubStructuredTextGenerator(JsonSerializer.Serialize(new { characters = new[] { candidate } }));
+        CharacterProfile[] known = [
+            new() { Id = "copy-one", DisplayName = "Simulacrum", IsNamed = true },
+            new() { Id = "copy-four", DisplayName = "Simulacrum number four", Aliases = ["Simulacrum"], IsNamed = true }];
+        var profile = Assert.Single(await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), known));
+        Assert.Equal("copy-one", profile.Id);
+        Assert.True(profile.IsNamed);
     }
 
     /// <summary>Conflicting duplicates receive a corrective request.</summary>
