@@ -60,10 +60,15 @@ public sealed class CharacterPresentationVerifier(IStructuredTextGenerator gener
                     if (item.Presentation == "unspecified") { result[character.Id] = "unspecified"; continue; }
                     if (item.Presentation is not ("male" or "female") || item.Evidence.Count == 0 ||
                         item.Evidence.Any(quote => string.IsNullOrWhiteSpace(quote) || !text.Contains(quote, StringComparison.Ordinal)) ||
-                        !item.Evidence.Any(quote => names.Any(name => Regex.IsMatch(quote,
-                            @"(?<!\w)" + Regex.Escape(name) + @"(?!\w)", RegexOptions.IgnoreCase)) &&
-                            Regex.IsMatch(quote, marker, RegexOptions.IgnoreCase) &&
-                            !Regex.IsMatch(quote, oppositeMarker, RegexOptions.IgnoreCase)))
+                        !item.Evidence.Any(quote => Regex.Split(quote, @"[.!?\r\n]+").Any(sentence =>
+                            names.Any(name => ContainsName(sentence, name)) &&
+                            Regex.IsMatch(sentence, marker, RegexOptions.IgnoreCase) &&
+                            !Regex.IsMatch(sentence, oppositeMarker, RegexOptions.IgnoreCase) &&
+                            !characters.Where(other => !other.Id.Equals(character.Id, StringComparison.OrdinalIgnoreCase))
+                                .Any(other => other.Aliases.Append(other.DisplayName)
+                                    .Where(name => !string.IsNullOrWhiteSpace(name) &&
+                                        !names.Contains(name, StringComparer.OrdinalIgnoreCase))
+                                    .Any(name => ContainsName(sentence, name))))))
                     {
                         corrections.Add($"{character.Id}: {item.Presentation} lacks exact source evidence naming this character and supporting that presentation. " +
                             "Supply verifiable quotations or return unspecified. Rejected evidence: " + JsonSerializer.Serialize(item.Evidence));
@@ -88,6 +93,9 @@ public sealed class CharacterPresentationVerifier(IStructuredTextGenerator gener
         }
         return result;
     }
+
+    private static bool ContainsName(string text, string name) => Regex.IsMatch(text,
+        @"(?<!\w)" + Regex.Escape(name) + @"(?!\w)", RegexOptions.IgnoreCase);
 
     private sealed class Review { public IReadOnlyList<Entry> Characters { get; init; } = []; }
     private sealed class Entry

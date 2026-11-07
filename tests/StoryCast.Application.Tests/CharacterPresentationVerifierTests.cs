@@ -7,6 +7,19 @@ namespace StoryCast.Application.Tests.Attribution;
 
 public sealed class CharacterPresentationVerifierTests
 {
+    [Theory]
+    [InlineData("Davis watched James. He smiled.")]
+    [InlineData("Davis watched James, his smile widening.")]
+    public async Task RejectsPronounsBelongingToAnotherNamedCharacter(string prose)
+    {
+        var generator = new Generator(JsonSerializer.Serialize(new { characters = new[] {
+            new { id = "davis", presentation = "male", evidence = new[] { prose } },
+            new { id = "james", presentation = "unspecified", evidence = Array.Empty<string>() } } }));
+        var result = await new CharacterPresentationVerifier(generator).VerifyAsync(prose,
+            [new() { Id = "davis", DisplayName = "Davis" }, new() { Id = "james", DisplayName = "James" }]);
+        Assert.Equal("unspecified", result["davis"]);
+    }
+
     [Fact]
     public async Task IndependentlyChecksEveryIdentityWithoutSeeingProposedPresentations()
     {
