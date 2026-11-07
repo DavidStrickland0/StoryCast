@@ -75,36 +75,49 @@ public sealed class OllamaStructuredTextGenerator
 
         try
         {
-            using var response = await httpClient.PostAsJsonAsync(
-                "api/generate",
-                request,
-                SerializerOptions,
-                cancellationToken);
-
-            var responseBody = await response.Content.ReadAsStringAsync(
-                cancellationToken);
-
-            if (!response.IsSuccessStatusCode)
+            // Greedy decoding can enter the same loop on every caller retry.
+            // One bounded recovery changes sampling while preserving source/schema.
+            for (var attempt = 0; attempt < 2; attempt++)
             {
-                throw new HttpRequestException(
-                    $"Ollama returned HTTP {(int)response.StatusCode}: " +
+                using var response = await httpClient.PostAsJsonAsync(
+                    "api/generate",
+                    request,
+                    SerializerOptions,
+                    cancellationToken);
+
+                var responseBody = await response.Content.ReadAsStringAsync(
+                    cancellationToken);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (attempt == 0 && response.StatusCode == System.Net.HttpStatusCode.InternalServerError &&
+                        responseBody.Contains("token repeat limit reached", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Console.WriteLine($"Ollama '{model}' hit a token repetition loop; retrying once with non-greedy sampling.");
+                        request.Options.Temperature = 0.3;
+                        continue;
+                    }
+                    throw new HttpRequestException(
+                        $"Ollama returned HTTP {(int)response.StatusCode}: " +
+                        responseBody,
+                        inner: null,
+                        response.StatusCode);
+                }
+
+                var result = JsonSerializer.Deserialize<GenerateResponse>(
                     responseBody,
-                    inner: null,
-                    response.StatusCode);
+                    SerializerOptions);
+
+                if (result is null ||
+                    string.IsNullOrWhiteSpace(result.Response))
+                {
+                    throw new InvalidDataException(
+                        "Ollama returned an empty structured response.");
+                }
+
+                return result.Response;
             }
-
-            var result = JsonSerializer.Deserialize<GenerateResponse>(
-                responseBody,
-                SerializerOptions);
-
-            if (result is null ||
-                string.IsNullOrWhiteSpace(result.Response))
-            {
-                throw new InvalidDataException(
-                    "Ollama returned an empty structured response.");
-            }
-
-            return result.Response;
+            throw new InvalidOperationException("Structured generation recovery exhausted.");
         }
         catch (JsonException exception)
         {
@@ -137,7 +150,7 @@ public sealed class OllamaStructuredTextGenerator
 
     private sealed class GenerationOptions
     {
-        public double Temperature { get; init; }
+        public double Temperature { get; set; }
 
         [JsonPropertyName("num_ctx")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

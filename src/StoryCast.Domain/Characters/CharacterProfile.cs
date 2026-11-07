@@ -34,6 +34,8 @@ public sealed class CharacterProfile
     /// Gets the presentation preferred for the character's voice.
     /// </summary>
     public string VoicePresentation { get; init; } = "unspecified";
+    /// <summary>Gets exact source quotations supporting the voice presentation.</summary>
+    public IReadOnlyList<string> VoicePresentationEvidence { get; init; } = [];
     /// <summary>
     /// Gets a value indicating whether the manuscript gives the
     /// character a proper name or identity-specific title.

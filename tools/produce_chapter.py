@@ -1948,6 +1948,8 @@ def main() -> int:
             export_audio = ambience_audio
             report["ambienceAudioPath"] = str(ambience_audio)
             report["ambienceReportPath"] = str(ambience_report)
+            report["ambienceWarnings"] = load_json(ambience_report).get("warnings", [])
+            report["reviewRequired"] |= bool(report["ambienceWarnings"])
 
         current_stage = "MP3 export"
         artwork_inputs = [tools_directory / "chapter_art.py"]

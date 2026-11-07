@@ -201,18 +201,23 @@ public sealed partial class CharacterDiscoveryService
                 }
                 var profiles = ValidateAndMap(response, knownCharacters, chapter.ChapterId, chapter.SpokenText);
                 var verified = await new CharacterPresentationVerifier(generator)
-                    .VerifyAsync(chapter.SpokenText, profiles, cancellationToken);
+                    .VerifyWithEvidenceAsync(chapter.SpokenText, profiles, cancellationToken);
                 return profiles.Select(profile =>
                 {
-                    var presentation = verified[profile.Id];
+                    var review = verified[profile.Id];
+                    var presentation = review.Presentation;
+                    var evidence = review.Evidence;
                     var known = knownCharacters.SingleOrDefault(character =>
                         string.Equals(character.Id, profile.Id, StringComparison.OrdinalIgnoreCase));
                     if (known?.VoicePresentation is "male" or "female")
                     {
-                        if (presentation != "unspecified" && presentation != known.VoicePresentation)
-                            throw new InvalidDataException($"Character '{profile.Id}' has source-supported presentation '{presentation}' " +
-                                $"conflicting with saved '{known.VoicePresentation}'. Review the saved character profile and chapter prose.");
-                        presentation = known.VoicePresentation;
+                        if (presentation == "unspecified")
+                        {
+                            presentation = known.VoicePresentation;
+                            evidence = known.VoicePresentationEvidence;
+                        }
+                        else if (presentation != known.VoicePresentation)
+                            Console.WriteLine($"Character '{profile.Id}': correcting saved presentation '{known.VoicePresentation}' to source-supported '{presentation}'.");
                     }
                     if (presentation != profile.VoicePresentation)
                         Console.WriteLine($"Character '{profile.Id}': evidence review changed proposed presentation " +
@@ -220,7 +225,7 @@ public sealed partial class CharacterDiscoveryService
                     return new CharacterProfile {
                         Id = profile.Id, DisplayName = profile.DisplayName, Aliases = profile.Aliases,
                         Description = profile.Description, VoiceTraits = profile.VoiceTraits,
-                        VoicePresentation = presentation, IsNamed = profile.IsNamed,
+                        VoicePresentation = presentation, VoicePresentationEvidence = evidence, IsNamed = profile.IsNamed,
                         Importance = profile.Importance, IsNarrator = profile.IsNarrator
                     };
                 }).ToArray();
@@ -235,8 +240,37 @@ public sealed partial class CharacterDiscoveryService
             catch (HttpRequestException exception) when (!cancellationToken.IsCancellationRequested)
             {
                 Console.WriteLine($"Character discovery transport attempt {attempt}/3: {exception.Message}");
+                if (exception.Message.Contains("token repeat limit reached", StringComparison.OrdinalIgnoreCase) &&
+                    chapter.SpokenText.Length > 1500)
+                {
+                    // Do not submit the same failed passage repeatedly. Reduce its
+                    // scope, retain every source character, and carry identity state.
+                    var midpoint = chapter.SpokenText.Length / 2;
+                    var boundary = chapter.SpokenText.LastIndexOf('\n', midpoint - 1, midpoint);
+                    if (boundary >= midpoint / 2) midpoint = boundary + 1;
+                    Console.WriteLine($"Character discovery repetition recovery: splitting {chapter.SpokenText.Length} source characters into smaller passages.");
+                    var combined = new Dictionary<string, CharacterProfile>(StringComparer.OrdinalIgnoreCase);
+                    var registry = knownCharacters.ToDictionary(item => item.Id, StringComparer.OrdinalIgnoreCase);
+                    foreach (var (start, length) in new[] { (0, midpoint), (midpoint, chapter.SpokenText.Length - midpoint) })
+                    {
+                        var reduced = new PreparedChapter { ChapterId = chapter.ChapterId, SourcePath = chapter.SourcePath,
+                            SourceSha256 = chapter.SourceSha256, PreparationVersion = chapter.PreparationVersion,
+                            SpokenText = chapter.SpokenText.Substring(start, length) };
+                        var carried = (carriedIdentities ?? new HashSet<string>()).Concat(combined.Keys)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        foreach (var profile in await DiscoverPassageAsync(reduced, registry.Values.ToArray(), cancellationToken,
+                                     carried, start == 0 ? previousContext : chapter.SpokenText.Substring(Math.Max(0, start - 600), Math.Min(600, start))))
+                        {
+                            registry[profile.Id] = profile;
+                            combined[profile.Id] = profile;
+                        }
+                    }
+                    return combined.Values.ToArray();
+                }
+                if (exception.Message.Contains("token repeat limit reached", StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("Character discovery still hit repetition after bounded sampling and passage recovery; chapter progress is preserved. " + exception.Message, exception);
                 if (attempt == 3)
-                    throw new IOException("Character discovery could not reach a usable Ollama response after three bounded attempts; chapter progress is preserved.", exception);
+                    throw new IOException("Character discovery could not reach a usable Ollama response after three bounded attempts; chapter progress is preserved. " + exception.Message, exception);
                 userPrompt = originalPrompt;
             }
         }
@@ -336,12 +370,19 @@ public sealed partial class CharacterDiscoveryService
                 var namedMatches = knownCharacters.Where(character => character.IsNamed &&
                     character.Aliases.Append(character.DisplayName).Any(name =>
                         string.Equals(name.Trim(), candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase))).ToArray();
+                // A display name is stronger evidence than a shared alias.
+                // Generic unnamed roles may legitimately describe several saved
+                // identities; keep those chapter-scoped rather than guessing.
+                var exactMatches = namedMatches.Where(character => string.Equals(
+                    character.DisplayName.Trim(), candidate.DisplayName.Trim(),
+                    StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (exactMatches.Length == 1) namedMatches = exactMatches;
                 if (namedMatches.Length == 1)
                 {
                     existing = namedMatches[0];
                     hasExistingCharacter = true;
                 }
-                else if (namedMatches.Length > 1)
+                else if (namedMatches.Length > 1 && candidate.IsNamed)
                     throw new InvalidDataException($"Character '{candidate.DisplayName}' ambiguously matches known named identities.");
             }
 
@@ -375,13 +416,13 @@ public sealed partial class CharacterDiscoveryService
                         string.Equals(name.Trim(), previous.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase)) &&
                     existing.Aliases.Append(existing.DisplayName).Any(name =>
                         string.Equals(name.Trim(), candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase));
-                if ((sameKnownIdentity || (explicitChatHandle && previous.DisplayName.Equals(candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase))) &&
+                if ((sameKnownIdentity || (isNamed && previous.IsNamed &&
+                        previous.DisplayName.Equals(candidate.DisplayName.Trim(), StringComparison.OrdinalIgnoreCase))) &&
                     (sameKnownIdentity || previous.IsNarrator == candidate.IsNarrator) &&
                     (previous.VoicePresentation == presentation || previous.VoicePresentation == "unspecified" || presentation == "unspecified"))
                 {
-                    // Known aliases and legacy chapter-scoped handles can turn
-                    // multiple generated entries into the same established person.
-                    // Descriptive differences do not create a new identity.
+                    // Known aliases and compatible repeated named speakers refer
+                    // to one identity. Preserve an established narrator flag.
                     profiles[profiles.IndexOf(previous)] = new CharacterProfile
                     {
                         Id = previous.Id, DisplayName = previous.DisplayName,
