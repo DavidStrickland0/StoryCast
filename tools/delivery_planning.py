@@ -131,6 +131,9 @@ def select_reference(base_sample, voice_id, direction):
 
 
 def reference_settings(settings, sample, voice_id, direction):
-    reference, capability = select_reference(sample, voice_id, direction)
+    if settings.get("voicePolicy") == "stable-base-v1":
+        reference, capability = sample, "base-reference"
+    else:
+        reference, capability = select_reference(sample, voice_id, direction)
     result = dict(settings, referenceSha256=hashlib.sha256(reference.read_bytes()).hexdigest(), referenceMode=capability)
     return reference, result

@@ -77,7 +77,7 @@ def chapter_title(
     manifest: dict,
     track_number: int,
 ) -> str:
-    """Read the chapter title from its first Markdown heading."""
+    """Preserve captured page titles, falling back to Markdown headings."""
     chapters = manifest["chapters"]
 
     if track_number > len(chapters):
@@ -95,6 +95,15 @@ def chapter_title(
         raise FileNotFoundError(
             f"Chapter source was not found: {source_path}"
         )
+
+    capture_path = book / "source.json"
+    if capture_path.is_file():
+        capture = load_json(capture_path)
+        for chapter in capture.get("chapters", []):
+            if (book / chapter.get("path", "")).resolve() == source_path:
+                title = chapter.get("title", "").strip()
+                if title:
+                    return title
 
     with source_path.open(
         "r",

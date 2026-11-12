@@ -91,6 +91,11 @@ class DeliveryPlanningTests(unittest.TestCase):
             reference, settings = delivery.reference_settings({}, base, "maren-unique", "whispered")
             self.assertEqual(variant, reference)
             self.assertEqual("approved-same-voice-reference", settings["referenceMode"])
+            stable = resolve_segment_synthesis_settings({}, "maren", "Hello.", "whispered")
+            reference, settings = delivery.reference_settings(stable, base, "maren-unique", "whispered")
+            self.assertEqual(base, reference)
+            self.assertEqual("base-reference", settings["referenceMode"])
+            self.assertEqual(hashlib.sha256(base.read_bytes()).hexdigest(), settings["referenceSha256"])
             entry["approved"] = False
             save()
             self.assertEqual(base, delivery.select_reference(base, "maren-unique", "whispering")[0])
