@@ -42,9 +42,9 @@ class ProsodyTests(unittest.TestCase):
             "angry-shouting",
             settings["profile"],
         )
-        self.assertEqual(0.85, settings["exaggeration"])
-        self.assertEqual(0.45, settings["cfgWeight"])
-        self.assertEqual(0.75, settings["temperature"])
+        self.assertEqual(0.7, settings["exaggeration"])
+        self.assertEqual(0.5, settings["cfgWeight"])
+        self.assertEqual(0.7, settings["temperature"])
 
     def test_reduces_whispering_intensity(self) -> None:
         settings = resolve_segment_synthesis_settings(
@@ -55,9 +55,21 @@ class ProsodyTests(unittest.TestCase):
         )
 
         self.assertEqual("whispering", settings["profile"])
-        self.assertEqual(0.5, settings["exaggeration"])
-        self.assertEqual(0.55, settings["cfgWeight"])
-        self.assertEqual(0.6, settings["temperature"])
+        self.assertEqual(0.6, settings["exaggeration"])
+        self.assertEqual(0.5, settings["cfgWeight"])
+        self.assertEqual(0.7, settings["temperature"])
+
+    def test_free_form_delivery_keeps_voice_controls_near_cast_baseline(self):
+        for intensity in (-0.3, 0.2):
+            settings = resolve_segment_synthesis_settings(
+                BASELINE, "kaelen", "Stay here.", "emotional",
+                {"direction": "emotional", "adjustments": {
+                    "exaggeration": intensity, "cfgWeight": -0.1,
+                    "temperature": 0.1}})
+            self.assertLessEqual(abs(settings["exaggeration"] - 0.65), 0.050001)
+            self.assertEqual(0.5, settings["cfgWeight"])
+            self.assertEqual(0.7, settings["temperature"])
+            self.assertEqual("stable-base-v1", settings["voicePolicy"])
 
     def test_detects_urgent_punctuation(self) -> None:
         self.assertEqual(

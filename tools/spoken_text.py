@@ -117,6 +117,8 @@ def normalize_spoken_text(text: str) -> str:
     # invented words or invalid speech tokens. Keep prose/equations intact.
     text = re.sub(r"(?m)^[ \t]*={3,}[ \t]*$", "", text)
     text = text.translate(str.maketrans({"\u2019": "'", "\u2018": "'"}))
+    # Spell out the conversational abbreviation so TTS consistently says okay.
+    text = re.sub(r"(?<!\w)OK(?!\w)", "okay", text, flags=re.IGNORECASE)
     # Read punctuation-only chat reactions literally instead of inventing a
     # response or leaving a username followed by unpronounceable punctuation.
     text = re.sub(

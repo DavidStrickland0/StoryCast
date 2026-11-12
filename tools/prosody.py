@@ -234,14 +234,20 @@ def resolve_segment_synthesis_settings(
         "profile": profile,
         "deliveryDirection": delivery.strip(),
         "deliveryCapability": "approximate-parameters",
-        "deliveryVersion": 1,
+        "deliveryVersion": 2,
+        "voicePolicy": "stable-base-v1",
     }
 
+    # Acting may slightly change intensity. Randomness and reference adherence
+    # belong to the cast voice, not to each line's delivery instruction.
     for name, baseline_value in baseline.items():
         minimum, maximum = LIMITS[name]
         resolved[name] = round(
             clamp(
-                baseline_value + adjustments[name],
+                baseline_value + (
+                    clamp(adjustments[name], -0.05, 0.05)
+                    if name == "exaggeration" else 0.0
+                ),
                 minimum,
                 maximum,
             ),

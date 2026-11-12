@@ -12,6 +12,11 @@ from spoken_text import currency_amounts, normalize_spoken_text
 
 
 class SpokenTextTests(unittest.TestCase):
+    def test_expands_ok_without_changing_words_or_handles(self):
+        self.assertEqual('okay, okay? okay!', normalize_spoken_text('OK, Ok? ok!'))
+        self.assertEqual('okay okayPlayer OK123 TOKYO', normalize_spoken_text('okay okayPlayer OK123 TOKYO'))
+        self.assertEqual(normalize_spoken_text('OK.'), normalize_spoken_text('okay.'))
+
     def test_scene_dividers_are_silent_but_equations_are_preserved(self):
         self.assertEqual("Before.\n\nAfter.", normalize_spoken_text("Before.\n=====\nAfter."))
         self.assertEqual("A = B", normalize_spoken_text("A = B"))
