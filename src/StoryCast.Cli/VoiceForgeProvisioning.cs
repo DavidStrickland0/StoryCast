@@ -157,11 +157,23 @@ internal static class VoiceForgeProvisioning
     private static async Task<int> DockerAsync(IReadOnlyList<string> arguments, bool quiet = false)
     {
         var start = new ProcessStartInfo("docker") { UseShellExecute = false, RedirectStandardOutput = quiet, RedirectStandardError = quiet };
-        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        foreach (var argument in DeviceArguments(arguments, Environment.GetEnvironmentVariable("STORYCAST_DEVICE"))) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new IOException("Could not start Docker.");
         var output = quiet ? process.StandardOutput.ReadToEndAsync() : Task.FromResult("");
         var error = quiet ? process.StandardError.ReadToEndAsync() : Task.FromResult("");
         await Task.WhenAll(process.WaitForExitAsync(), output, error);
         return process.ExitCode;
+    }
+
+    internal static IReadOnlyList<string> DeviceArguments(IReadOnlyList<string> arguments, string? device)
+    {
+        if (arguments.Count == 0 || arguments[0] != "run" || !string.Equals(device, "cpu", StringComparison.OrdinalIgnoreCase)) return arguments;
+        var result = new List<string> { "run", "--env", "STORYCAST_DEVICE=cpu", "--env", "VOICEFORGE_DEVICE=cpu" };
+        for (var index = 1; index < arguments.Count; index++)
+        {
+            if (arguments[index] == "--gpus") { index++; continue; }
+            result.Add(arguments[index]);
+        }
+        return result;
     }
 }

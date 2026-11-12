@@ -106,7 +106,8 @@ internal static class CastingCommands
 
             IVerifiedVoiceLibrary verifiedVoiceLibrary =
                 new FileSystemVerifiedVoiceLibrary(
-                    voiceLibrary);
+                    voiceLibrary,
+                    allowUnverifiedEntries: true);
 
             var workflow = new CastingWorkflow(
                 new FileSystemCharacterRegistryStore(),

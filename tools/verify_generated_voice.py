@@ -3,6 +3,7 @@ import argparse
 import gc
 import hashlib
 import json
+import os
 from pathlib import Path
 from analyze_voice_library import analyze
 
@@ -56,7 +57,8 @@ def main():
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
             configure_tokenizer_cache()
             torch.manual_seed(1729)
-            model = ChatterboxMultilingualTTS.from_pretrained(device='cuda', t3_model='v3')
+            device = 'cpu' if os.environ.get('STORYCAST_DEVICE', '').lower() == 'cpu' else 'cuda'
+            model = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model='v3')
             with torch.inference_mode():
                 audio = model.generate(AUDITION_TEXT, language_id='en', audio_prompt_path=str(sample),
                                        exaggeration=0.4, cfg_weight=0.5, temperature=0.7)
@@ -64,7 +66,8 @@ def main():
             torchaudio.save(str(audition), audio.detach().cpu().float(), model.sr)
             del model, audio
             gc.collect()
-            torch.cuda.empty_cache()
+            if device == 'cuda':
+                torch.cuda.empty_cache()
             report['audition'] = verify(audition, AUDITION_TEXT)
             report['status'] = 'pass' if report['audition']['status'] == 'pass' else 'fail'
     target = root / 'generated-verification.json'

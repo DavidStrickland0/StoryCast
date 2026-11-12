@@ -7,6 +7,18 @@ namespace StoryCast.Infrastructure.Tests;
 
 public sealed class VoiceForgeProvisioningTests
 {
+    [Fact]
+    public void CpuProvisioningRemovesGpuReservationAndConfiguresBothWorkers()
+    {
+        string[] command = ["run", "--rm", "--gpus", "all", "--entrypoint", "python", "image", "script.py"];
+        var cpu = VoiceForgeProvisioning.DeviceArguments(command, "cpu");
+        Assert.DoesNotContain("--gpus", cpu);
+        Assert.Contains("STORYCAST_DEVICE=cpu", cpu);
+        Assert.Contains("VOICEFORGE_DEVICE=cpu", cpu);
+        Assert.Equal(command, VoiceForgeProvisioning.DeviceArguments(command, "cuda"));
+        Assert.Equal(new[] { "image", "inspect", "image" }, VoiceForgeProvisioning.DeviceArguments(["image", "inspect", "image"], "cpu"));
+    }
+
     private static CharacterProfile Maren() => new() { Id = "maren", DisplayName = "Maren", VoicePresentation = "female", VoiceTraits = ["gruff", "clipped"] };
     private static VoiceProfile Voice(string presentation = "female", params string[] traits) => new() { Id = "voice", SamplePath = "sample.wav", Presentation = presentation, Qualities = traits };
 

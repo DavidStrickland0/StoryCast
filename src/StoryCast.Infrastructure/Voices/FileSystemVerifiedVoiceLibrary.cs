@@ -21,6 +21,7 @@ public sealed class FileSystemVerifiedVoiceLibrary
         };
 
     private readonly IVoiceLibrary voiceLibrary;
+    private readonly bool allowUnverifiedEntries;
 
     /// <summary>
     /// Initializes a verified filesystem voice library.
@@ -28,11 +29,14 @@ public sealed class FileSystemVerifiedVoiceLibrary
     /// <param name="voiceLibrary">
     /// The underlying validated voice library.
     /// </param>
+    /// <param name="allowUnverifiedEntries">Exclude unverified entries instead of blocking automatic provisioning.</param>
     public FileSystemVerifiedVoiceLibrary(
-        IVoiceLibrary voiceLibrary)
+        IVoiceLibrary voiceLibrary,
+        bool allowUnverifiedEntries = false)
     {
         this.voiceLibrary = voiceLibrary ??
             throw new ArgumentNullException(nameof(voiceLibrary));
+        this.allowUnverifiedEntries = allowUnverifiedEntries;
     }
 
     /// <inheritdoc />
@@ -55,6 +59,11 @@ public sealed class FileSystemVerifiedVoiceLibrary
 
         if (!File.Exists(reportPath))
         {
+            if (this.allowUnverifiedEntries)
+            {
+                return [];
+            }
+
             throw new FileNotFoundException(
                 "Voice verification must be completed before casting: " +
                 reportPath,
@@ -121,6 +130,11 @@ public sealed class FileSystemVerifiedVoiceLibrary
                     voice.Id,
                     out var result))
             {
+                if (this.allowUnverifiedEntries)
+                {
+                    continue;
+                }
+
                 throw new InvalidDataException(
                     $"Voice '{voice.Id}' is missing from the verification " +
                     $"report. Run voices verify again.");
@@ -135,7 +149,7 @@ public sealed class FileSystemVerifiedVoiceLibrary
             }
         }
 
-        if (eligibleVoices.Count == 0)
+        if (eligibleVoices.Count == 0 && !this.allowUnverifiedEntries)
         {
             throw new InvalidDataException(
                 "No voices passed speech verification.");
