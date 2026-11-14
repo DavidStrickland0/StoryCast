@@ -103,19 +103,35 @@ internal static class VoiceForgeProvisioning
         if (await DockerAsync(["image", "inspect", image], true) != 0 && await DockerAsync(["build", "-f", Path.Combine(forgeRoot, "Dockerfile.design"), "-t", image, forgeRoot]) != 0) throw new IOException("VoiceForge image build failed.");
         var tools = Path.GetFullPath("tools");
         if (!File.Exists(Path.Combine(tools, "verify_generated_voice.py"))) throw new FileNotFoundException($"StoryCast verification tools missing at {tools}. Run from the StoryCast repository.");
-        for (var attempt = 0; attempt < 3; attempt++)
+        var retained = RetainedCandidate(root, role.Id);
+        var firstAttempt = 0;
+        if (retained is not null)
+        {
+            using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(root, "candidates", retained, "voice.json")));
+            if (manifest.RootElement.TryGetProperty("seed", out var seed) && seed.TryGetInt32(out var value) && value >= 10000)
+                firstAttempt = Math.Min(2, (value - 10000) / 1009);
+        }
+        for (var attempt = firstAttempt; attempt < 3; attempt++)
         {
             var resultPath = Path.Combine(root, "candidate-result.json");
-            if (File.Exists(resultPath)) File.Delete(resultPath);
-            var generated = await DockerAsync(["run", "--rm", "--gpus", "all", "--entrypoint", "python", "--mount", $"type=bind,source={forgeRoot},target=/automation,readonly",
-                "--mount", $"type=bind,source={root},target=/requests", "--mount", "type=volume,source=voiceforge-models,target=/models", image,
-                "/automation/generate_candidate.py", "/requests/casting-request.json", "--role", role.Id, "--seed", (10000 + attempt * 1009).ToString()]);
-            if (generated != 0 || !File.Exists(resultPath)) throw new IOException($"VoiceForge generation failed for '{role.Id}'. See output above; existing casting is preserved.");
+            if (retained is null)
+            {
+                if (File.Exists(resultPath)) File.Delete(resultPath);
+                var generated = await DockerAsync(["run", "--rm", "--gpus", "all", "--entrypoint", "python", "--mount", $"type=bind,source={forgeRoot},target=/automation,readonly",
+                    "--mount", $"type=bind,source={root},target=/requests", "--mount", "type=volume,source=voiceforge-models,target=/models", image,
+                    "/automation/generate_candidate.py", "/requests/casting-request.json", "--role", role.Id, "--seed", (10000 + attempt * 1009).ToString()]);
+                if (generated != 0 || !File.Exists(resultPath)) throw new IOException($"VoiceForge generation failed for '{role.Id}'. See output above; existing casting is preserved.");
+            }
+            else
+            {
+                Console.WriteLine($"VoiceForge: reusing completed candidate '{retained}' for '{role.Id}' after restart.");
+                retained = null;
+            }
             using var result = JsonDocument.Parse(await File.ReadAllTextAsync(resultPath));
             var identity = result.RootElement.GetProperty("voiceId").GetString() ?? "";
             if (result.RootElement.GetProperty("roleId").GetString() != role.Id || !Regex.IsMatch(identity, "^voiceforge-[a-f0-9]{32}$")) throw new InvalidDataException("Invalid VoiceForge candidate identity.");
             var candidate = Path.Combine(root, "candidates", identity);
-            var verified = await DockerAsync(["run", "--rm", "--gpus", "all", "--entrypoint", "python", "--mount", $"type=bind,source={root},target=/requests",
+            var verified = SavedVerification(candidate, tools) ?? await DockerAsync(["run", "--rm", "--gpus", "all", "--entrypoint", "python", "--mount", $"type=bind,source={root},target=/requests",
                 "--mount", $"type=bind,source={tools},target=/app/tools,readonly", "--mount", "type=volume,source=storycast-models,target=/models", workerImage,
                 "/app/tools/verify_generated_voice.py", $"/requests/candidates/{identity}", "--model", whisper]);
             if (verified != 0) { Console.WriteLine($"VoiceForge: '{role.Id}' candidate {attempt+1}/3 failed verification. Trying another seed. Report: {Path.Combine(candidate, "generated-verification.json")}"); continue; }
@@ -123,6 +139,30 @@ internal static class VoiceForgeProvisioning
             return (await new FileSystemVoiceLibrary().LoadAsync(library)).Single(voice => voice.Id == identity);
         }
         throw new InvalidDataException($"No verified voice for '{role.Id}' after three candidates. Existing casting retained. Candidates: {Path.Combine(root, "candidates")}");
+    }
+
+    internal static string? RetainedCandidate(string root, string role)
+    {
+        var path = Path.Combine(root, "candidate-result.json");
+        if (!File.Exists(path)) return null;
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        if (document.RootElement.GetProperty("roleId").GetString() != role) return null;
+        var identity = document.RootElement.GetProperty("voiceId").GetString() ?? "";
+        if (!Regex.IsMatch(identity, "^voiceforge-[a-f0-9]{32}$")) throw new InvalidDataException("Invalid retained VoiceForge candidate identity.");
+        var candidate = Path.Combine(root, "candidates", identity);
+        if (!File.Exists(Path.Combine(candidate, "voice.json")) || !File.Exists(Path.Combine(candidate, "sample.wav")))
+            throw new InvalidDataException("Retained VoiceForge candidate is incomplete. Existing files are preserved.");
+        return identity;
+    }
+
+    private static int? SavedVerification(string candidate, string tools)
+    {
+        var path = Path.Combine(candidate, "generated-verification.json");
+        if (!File.Exists(path)) return null;
+        using var report = JsonDocument.Parse(File.ReadAllText(path));
+        var current = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(tools, "verify_generated_voice.py")))).ToLowerInvariant();
+        if (!report.RootElement.TryGetProperty("verifierSha256", out var hash) || hash.GetString() != current) return null;
+        return report.RootElement.GetProperty("status").GetString() == "pass" ? 0 : 2;
     }
 
     internal static async Task ImportVerifiedAsync(string candidate, string library, string identity)

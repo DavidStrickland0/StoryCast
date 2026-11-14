@@ -8,6 +8,25 @@ namespace StoryCast.Infrastructure.Tests;
 public sealed class VoiceForgeProvisioningTests
 {
     [Fact]
+    public void RestartRetainsOnlyACompleteCandidateForTheRequestedRole()
+    {
+        var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        const string identity = "voiceforge-0123456789abcdef0123456789abcdef";
+        var folder = Path.Combine(root, "candidates", identity);
+        Directory.CreateDirectory(folder);
+        try
+        {
+            File.WriteAllText(Path.Combine(root, "candidate-result.json"), JsonSerializer.Serialize(new { roleId = "narrator", voiceId = identity }));
+            Assert.Null(VoiceForgeProvisioning.RetainedCandidate(root, "another-role"));
+            Assert.Throws<InvalidDataException>(() => VoiceForgeProvisioning.RetainedCandidate(root, "narrator"));
+            File.WriteAllText(Path.Combine(folder, "voice.json"), "{}");
+            File.WriteAllBytes(Path.Combine(folder, "sample.wav"), [1, 2, 3]);
+            Assert.Equal(identity, VoiceForgeProvisioning.RetainedCandidate(root, "narrator"));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void CpuProvisioningRemovesGpuReservationAndConfiguresBothWorkers()
     {
         string[] command = ["run", "--rm", "--gpus", "all", "--entrypoint", "python", "image", "script.py"];
