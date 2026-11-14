@@ -21,6 +21,33 @@ sys.path.insert(
 import produce_chapter
 
 
+class OptionalAmbienceTests(unittest.TestCase):
+    def test_failure_exports_clean_narration_and_persists_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = {"stageCheckpoints": {"ambience": {"old": True}, "mastered": {"verified": True}},
+                      "ambienceAudioPath": "stale.wav", "reviewRequired": False}
+            def fail():
+                report["ambienceAudioPath"] = "partial.wav"
+                report["ambienceReportPath"] = "partial.json"
+                raise RuntimeError("SoundForge HTTP 500")
+            with patch("sys.stdout", new_callable=io.StringIO) as output:
+                audio = produce_chapter.optional_ambience(report, root / "run.json", root / "mastered.wav", fail)
+            self.assertEqual(root / "mastered.wav", audio)
+            saved = json.loads((root / "run.json").read_text())
+            self.assertFalse(saved["ambienceEnabled"])
+            self.assertIn("HTTP 500", saved["ambienceError"])
+            self.assertNotIn("ambience", saved["stageCheckpoints"])
+            self.assertTrue(saved["stageCheckpoints"]["mastered"]["verified"])
+            self.assertNotIn("ambienceAudioPath", saved)
+            self.assertIn("Continuing", output.getvalue())
+            # The same saved run can retry ambience successfully after an update.
+            mixed = root / "mixed.wav"
+            self.assertEqual(mixed, produce_chapter.optional_ambience(report, root / "run.json", audio, lambda: mixed))
+            self.assertTrue(report["ambienceEnabled"])
+            self.assertNotIn("ambienceError", report)
+
+
 class SegmentRetryTests(unittest.TestCase):
     def test_retry_loop_uses_persistent_verifier_instead_of_subprocess(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -122,6 +122,13 @@ internal static class SoundForgeRuntime
     {
         var folder = Path.Combine(runDirectory, chapterId);
         var mixed = Path.Combine(folder, $"{chapterId}.ambience.wav");
+        var receipt = Path.Combine(runDirectory, "run.json");
+        if (File.Exists(receipt))
+        {
+            using var run = JsonDocument.Parse(File.ReadAllText(receipt));
+            if (run.RootElement.TryGetProperty("ambienceEnabled", out var enabled) && !enabled.GetBoolean())
+                return Path.Combine(folder, $"{chapterId}.mastered.wav");
+        }
         return ambienceEnabled && File.Exists(mixed) ? mixed : Path.Combine(folder, $"{chapterId}.mastered.wav");
     }
 }

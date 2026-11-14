@@ -112,7 +112,14 @@ internal static class ProductionCommands
                 if (GetOptionValue(args, option) is { } optionValue) castingArguments.AddRange([option, optionValue]);
             if (await CastingCommands.AssignAsync(castingArguments.ToArray()) != 0)
                 throw new InvalidDataException("Chapter audio requires a verified casting plan matching the character attributes.");
-            await SoundForgeRuntime.EnsureAsync(ambience);
+            try
+            {
+                await SoundForgeRuntime.EnsureAsync(ambience);
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine($"Warning: SoundForge startup failed: {error.Message}. Continuing; ambience is optional.");
+            }
             await IllustrationRuntime.EnsureAsync(bookPath);
 
             if (!Directory.Exists(bookPath))
