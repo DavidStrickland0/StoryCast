@@ -190,7 +190,7 @@ def main() -> int:
 
     temporary_path = (
         chapter_directory /
-        f".{chapter_id}.wav.tmp"
+        f".{chapter_id}.tmp.wav"
     )
 
     torchaudio.save(

@@ -20,7 +20,7 @@ def sha256_file(path: Path) -> str:
 
 
 def save_audio(path: Path, audio: torch.Tensor, sample_rate: int) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = path.with_name(f".{path.stem}.tmp.wav")
     torchaudio.save(
         str(temporary),
         audio,

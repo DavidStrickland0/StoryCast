@@ -735,7 +735,7 @@ def main(
 
         temporary_output_path = (
             chapter_directory /
-            f".segment-{segment_index:04d}.wav.tmp"
+            f".segment-{segment_index:04d}.tmp.wav"
         )
 
         print(
@@ -866,7 +866,7 @@ def main(
                     chunk_audio = generated_audio.detach().to(device='cpu', dtype=torch.float32)
                     del generated_audio
                     chunk_audio, audio_processing = polish_audio(chunk_audio, model.sr)
-                    chunk_temporary_path = chunk_output_path.with_name(f'.{chunk_output_path.name}.tmp')
+                    chunk_temporary_path = chunk_output_path.with_name(f'.{chunk_output_path.stem}.tmp.wav')
                     torchaudio.save(str(chunk_temporary_path), chunk_audio, model.sr, format='wav')
                     chunk_temporary_path.replace(chunk_output_path)
                 chunk_record = {
