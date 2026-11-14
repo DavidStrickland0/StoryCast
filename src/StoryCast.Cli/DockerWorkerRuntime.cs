@@ -281,8 +281,8 @@ internal sealed class DockerWorkerRuntime
     {
         startInfo.ArgumentList.Add("--mount");
 
-        var mount =
-            $"type={type},source={source},target={target}";
+        static string Field(string value) => "\"" + value.Replace("\"", "\"\"") + "\"";
+        var mount = $"type={type},{Field($"source={source}")},{Field($"target={target}")}";
 
         if (readOnly)
         {

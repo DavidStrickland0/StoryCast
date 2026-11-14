@@ -36,7 +36,8 @@ public sealed class CastingAssignmentValidator
             voice => voice.Id,
             StringComparer.OrdinalIgnoreCase);
 
-        if (voicesById.Count < requiredRoleIds.Count)
+        var narratorVoiceId = assignments.SingleOrDefault(item => item.CharacterId == "narrator")?.VoiceId;
+        if (voicesById.Count < requiredRoleIds.Count - assignments.Count(item => item.UsesNarratorFallback))
         {
             throw new InvalidDataException(
                 $"Casting requires {requiredRoleIds.Count} unique voices " +
@@ -51,6 +52,8 @@ public sealed class CastingAssignmentValidator
 
         foreach (var assignment in assignments)
         {
+            if (assignment.UsesNarratorFallback && (assignment.CharacterId == "narrator" || assignment.VoiceId != narratorVoiceId))
+                throw new InvalidDataException("Narrator fallback must use the assigned narrator voice for a character.");
             if (!requiredRoleIds.Contains(
                     assignment.CharacterId))
             {
@@ -76,7 +79,7 @@ public sealed class CastingAssignmentValidator
                     $"'{assignment.VoiceId}'.");
             }
 
-            if (!assignedVoiceIds.Add(
+            if (!assignment.UsesNarratorFallback && !assignedVoiceIds.Add(
                     assignment.VoiceId))
             {
                 throw new InvalidDataException(
@@ -84,7 +87,7 @@ public sealed class CastingAssignmentValidator
                     "more than once.");
             }
 
-            if (charactersById.TryGetValue(
+            if (!assignment.UsesNarratorFallback && charactersById.TryGetValue(
                     assignment.CharacterId,
                     out var character))
             {

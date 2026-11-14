@@ -101,8 +101,8 @@ internal static class SoundForgeRuntime
             var command = new List<string> { "run", "--detach", "--name", "soundforge", "--restart", "unless-stopped",
                 "-p", "127.0.0.1:7861:7861", "--env", $"SOUNDFORGE_DEVICE={device}",
                 "--env", $"SOUNDFORGE_HOST_ROOT={root}",
-                "--mount", $"type=bind,source={library},target=/library", "--mount", $"type=bind,source={previews},target=/data",
-                "--mount", $"type=bind,source={localModel},target=/local-model,readonly",
+                "--mount", VoiceForgeProvisioning.BindMount(library, "/library"), "--mount", VoiceForgeProvisioning.BindMount(previews, "/data"),
+                "--mount", VoiceForgeProvisioning.BindMount(localModel, "/local-model", true),
                 "--mount", "type=volume,source=soundforge-models,target=/models" };
             if (device == "cuda") command.AddRange(["--gpus", "all"]);
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HF_TOKEN"))) command.AddRange(["--env", "HF_TOKEN"]);
