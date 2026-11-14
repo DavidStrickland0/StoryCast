@@ -11,31 +11,9 @@ from pronunciations import apply_pronunciations, load_pronunciations
 from spoken_text import normalize_spoken_text
 
 VERSION = 1
-# Chatterbox accepts ordinary text, not IPA/SSML. Only these audited spellings
-# can reach synthesis; the language model selects meanings, never rewrites prose.
-SENSES = {
-    "bow": {"weapon_or_ribbon": "boh", "bend_or_ship_front": "bough"},
-    "bows": {"weapons_or_ribbons": "bohs", "bends_or_ship_fronts": "boughs"},
-    "lead": {"guide_or_front": "leed", "metal": "led"},
-    "leads": {"guides": "leeds", "metal_items": "leds"},
-    "read": {"present_or_infinitive": "reed", "past_or_participle": "red"},
-    "wind": {"moving_air": "wihnd", "turn_or_coil": "wined"},
-    "winds": {"moving_air": "wihnds", "turns_or_coils": "wines"},
-    "wound": {"injury": "woond", "past_of_wind": "wownd"},
-    "wounds": {"injuries": "woonds"},
-    "tear": {"eye_drop": "teer", "rip": "tare"},
-    "tears": {"eye_drops": "teers", "rips": "tares"},
-    "bass": {"low_musical_pitch": "base", "fish": "bass"},
-    "row": {"line_or_paddle": "roh", "argument": "rau"},
-    "sow": {"plant_seeds": "soh", "female_pig": "sau"},
-    "does": {"verb_do": "duz", "female_deer": "dohz"},
-    "live": {"reside_or_survive": "liv", "alive_or_broadcast": "lyve"},
-    "close": {"shut": "cloze", "near": "clohss"},
-    "use": {"verb": "yooz", "noun": "yooss"},
-    "minute": {"time_unit": "minnit", "very_small": "my noot"},
-    "content": {"satisfied": "kun tent", "contents_or_material": "kon tent"},
-}
-PATTERN = re.compile(r"\b(?:" + "|".join(SENSES) + r")\b", re.IGNORECASE)
+# Optional context-specific replacements. Empty by default; add only verified rules.
+SENSES = {}
+PATTERN = re.compile(r"\b(?:" + "|".join(SENSES) + r")\b" if SENSES else r"(?!)", re.IGNORECASE)
 
 
 def digest(value):
@@ -165,6 +143,9 @@ def prepare_context_pronunciations(book, chapter, segments, model, ollama_url):
 
 
 def load_context_plan(book, chapter):
+    # Ignore persisted substitutions when no automatic rules are enabled.
+    if not SENSES:
+        return {}
     path = plan_path(book, chapter)
     if not path.is_file():
         return {}
@@ -206,6 +187,8 @@ def render_units(units, plan, base_text, include_decisions=False):
             decision = decisions.get((word, occurrence))
             if decision:
                 applied.append(decision)
+                if decision["synthesisText"].casefold() == word:
+                    return match[0]
             return decision["synthesisText"] if decision else match[0]
         rendered = PATTERN.sub(replace, text)
         result.append((rendered, applied) if include_decisions else rendered)
