@@ -202,7 +202,10 @@ public sealed class FileSystemCastingPlanStore
                     $"'{assignment.CharacterId}': {planPath}");
             }
 
-            if (!voiceIds.Add(assignment.VoiceId))
+            if (assignment.UsesNarratorFallback && (assignment.CharacterId == "narrator" ||
+                !plan.Assignments.Any(item => item.CharacterId == "narrator" && item.VoiceId == assignment.VoiceId)))
+                throw new InvalidDataException("Narrator fallback must use the assigned narrator voice.");
+            if (!assignment.UsesNarratorFallback && !voiceIds.Add(assignment.VoiceId))
             {
                 throw new InvalidDataException(
                     $"Casting plan assigns voice " +

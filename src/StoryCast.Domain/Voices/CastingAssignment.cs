@@ -5,6 +5,9 @@ namespace StoryCast.Domain.Voices;
 /// </summary>
 public sealed class CastingAssignment
 {
+    /// <summary>Gets whether this character uses the narrator as a fallback.</summary>
+    public bool UsesNarratorFallback { get; init; }
+
     /// <summary>
     /// Gets the stable character identifier.
     /// </summary>

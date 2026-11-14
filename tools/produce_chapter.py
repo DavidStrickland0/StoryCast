@@ -1415,6 +1415,28 @@ def run_checkpointed_stage(
     return True
 
 
+def optional_ambience(report, run_manifest_path, mastered_audio, action):
+    """Ambience never invalidates verified narration or prevents MP3 export."""
+    report["ambienceEnabled"] = False
+    report.pop("ambienceError", None)
+    report.pop("ambienceWarnings", None)
+    report.pop("ambienceAudioPath", None)
+    report.pop("ambienceReportPath", None)
+    try:
+        audio = action()
+    except Exception as error:
+        report["ambienceError"] = str(error)
+        report.pop("ambienceAudioPath", None)
+        report.pop("ambienceReportPath", None)
+        report.setdefault("stageCheckpoints", {}).pop("ambience", None)
+        print(f"Warning: ambience failed: {error}. Continuing with verified narration.", flush=True)
+        write_run_manifest(run_manifest_path, report)
+        return mastered_audio
+    report["ambienceEnabled"] = True
+    write_run_manifest(run_manifest_path, report)
+    return audio
+
+
 def main() -> int:
     args = parse_args()
     if args.remix and args.resume_run_directory is None:
@@ -1920,36 +1942,38 @@ def main() -> int:
             report.pop("ambienceAudioPath", None)
             report.pop("ambienceReportPath", None)
         if not args.no_ambience:
-            from ambience import add_ambience
-            current_stage = "ambience"
-            ambience_audio = chapter_directory / f"{args.chapter}.ambience.wav"
-            ambience_report = chapter_directory / "ambience.json"
-            existing_ambience = load_json(ambience_report) if ambience_report.is_file() else {}
-            ambience_assets = [Path(cue["audioPath"]) for cue in existing_ambience.get("cues", [])]
-            ambience_base_inputs = [chapter_manifest, assembly_manifest, mastered_audio, mastered_verification_path,
-                                    tools_directory / "ambience.py"]
-            ambience_inputs = [*ambience_base_inputs, *ambience_assets]
+            def create_ambience_mix():
+                from ambience import add_ambience
+                ambience_audio = chapter_directory / f"{args.chapter}.ambience.wav"
+                ambience_report = chapter_directory / "ambience.json"
+                existing_ambience = load_json(ambience_report) if ambience_report.is_file() else {}
+                ambience_assets = [Path(cue["audioPath"]) for cue in existing_ambience.get("cues", [])]
+                ambience_base_inputs = [chapter_manifest, assembly_manifest, mastered_audio, mastered_verification_path,
+                                        tools_directory / "ambience.py"]
+                ambience_inputs = [*ambience_base_inputs, *ambience_assets]
 
-            def render_ambience():
-                add_ambience(chapter_manifest, assembly_manifest, mastered_audio,
-                             args.rewrite_model, args.ollama_url, args.soundforge_url, args.ambience_gain_db)
-                # Include newly downloaded assets in the first checkpoint, so
-                # a later resume can reuse it immediately and detect tampering.
-                ambience_inputs[:] = [*ambience_base_inputs,
-                                      *(Path(cue["audioPath"]) for cue in load_json(ambience_report)["cues"])]
+                def render_ambience():
+                    add_ambience(chapter_manifest, assembly_manifest, mastered_audio,
+                                 args.rewrite_model, args.ollama_url, args.soundforge_url, args.ambience_gain_db)
+                    # Include newly downloaded assets in the first checkpoint, so
+                    # a later resume can reuse it immediately and detect tampering.
+                    ambience_inputs[:] = [*ambience_base_inputs,
+                                          *(Path(cue["audioPath"]) for cue in load_json(ambience_report)["cues"])]
 
-            run_checkpointed_stage(
-                "SoundForge ambience", "ambience", report, run_manifest_path,
-                ambience_inputs,
-                {"version": 1, "soundforgeUrl": args.soundforge_url, "model": args.rewrite_model,
-                 "gainDb": args.ambience_gain_db},
-                [ambience_report, ambience_audio],
-                render_ambience)
-            export_audio = ambience_audio
-            report["ambienceAudioPath"] = str(ambience_audio)
-            report["ambienceReportPath"] = str(ambience_report)
-            report["ambienceWarnings"] = load_json(ambience_report).get("warnings", [])
-            report["reviewRequired"] |= bool(report["ambienceWarnings"])
+                run_checkpointed_stage(
+                    "SoundForge ambience", "ambience", report, run_manifest_path,
+                    ambience_inputs,
+                    {"version": 1, "soundforgeUrl": args.soundforge_url, "model": args.rewrite_model,
+                     "gainDb": args.ambience_gain_db},
+                    [ambience_report, ambience_audio],
+                    render_ambience)
+                report["ambienceAudioPath"] = str(ambience_audio)
+                report["ambienceReportPath"] = str(ambience_report)
+                report["ambienceWarnings"] = load_json(ambience_report).get("warnings", [])
+                report["reviewRequired"] |= bool(report["ambienceWarnings"])
+
+                return ambience_audio
+            export_audio = optional_ambience(report, run_manifest_path, mastered_audio, create_ambience_mix)
 
         current_stage = "MP3 export"
         artwork_inputs = [tools_directory / "chapter_art.py"]
@@ -1975,7 +1999,7 @@ def main() -> int:
             {
                 "bitrate": "64k",
                 "channels": 1,
-                "ambienceEnabled": not args.no_ambience,
+                "ambienceEnabled": report["ambienceEnabled"],
             },
             [
                 export_report_path,

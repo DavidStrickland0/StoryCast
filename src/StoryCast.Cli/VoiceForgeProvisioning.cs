@@ -13,6 +13,12 @@ using StoryCast.Infrastructure.Voices;
 
 internal static class VoiceForgeProvisioning
 {
+    internal static string BindMount(string source, string target, bool readOnly = false)
+    {
+        static string Field(string value) => "\"" + value.Replace("\"", "\"\"") + "\"";
+        return $"type=bind,{Field($"source={source}")},{Field($"target={target}")}" + (readOnly ? ",readonly" : "");
+    }
+
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true, WriteIndented = true };
 
     internal static bool AttributesMatch(CharacterProfile role, VoiceProfile voice)
@@ -37,7 +43,9 @@ internal static class VoiceForgeProvisioning
         var byVoice = voices.ToDictionary(voice => voice.Id, StringComparer.OrdinalIgnoreCase);
         return roles.Where(role => {
             var assigned = assignments.SingleOrDefault(item => item.CharacterId.Equals(role.Id, StringComparison.OrdinalIgnoreCase));
-            var matches = assigned is not null && byVoice.TryGetValue(assigned.VoiceId, out var voice) && AttributesMatch(role, voice);
+            var matches = assigned is not null && byVoice.TryGetValue(assigned.VoiceId, out var voice) &&
+                (AttributesMatch(role, voice) || (assigned.UsesNarratorFallback && role.Id != "narrator" &&
+                    assignments.Any(item => item.CharacterId == "narrator" && item.VoiceId == assigned.VoiceId)));
             if (!matches && assigned?.IsLocked == true) throw new InvalidDataException($"Locked casting for '{role.Id}' does not match required attributes. Unlock that assignment to recast it.");
             return !matches;
         }).ToArray();
@@ -70,21 +78,44 @@ internal static class VoiceForgeProvisioning
                 presentation = role.VoicePresentation, qualities = role.VoiceTraits, accent = "", age = "" }) });
         var reserved = assignments.Concat(plan?.RetiredAssignments ?? []).Select(item => item.VoiceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var replacements = new List<CastingAssignment>();
-        foreach (var role in roles.OrderByDescending(role => role.VoiceTraits.Count))
+        foreach (var role in roles.OrderByDescending(role => role.Id == "narrator").ThenByDescending(role => role.VoiceTraits.Count))
         {
+            var fallback = false;
             var match = voices.FirstOrDefault(voice => !reserved.Contains(voice.Id) && AttributesMatch(role, voice));
             if (match is null)
             {
-                Console.WriteLine($"VoiceForge: no verified attributed match for '{role.Id}' ({string.Join(", ", role.VoiceTraits)}); designing a voice.");
-                match = await GenerateAsync(role, root, library, Path.GetDirectoryName(Path.GetFullPath(script))!, image, workerImage, whisper);
-                voices = await verifiedLibrary.LoadAsync(library);
+                var narratorId = replacements.Concat(assignments).FirstOrDefault(item => item.CharacterId == "narrator")?.VoiceId;
+                var narrator = voices.FirstOrDefault(voice => voice.Id == narratorId);
+                if (role.Id != "narrator" && narrator is not null && role.VoiceTraits.Count == 0)
+                {
+                    match = narrator;
+                    fallback = true;
+                }
+                else
+                {
+                    Console.WriteLine($"VoiceForge: no verified attributed match for '{role.Id}' ({string.Join(", ", role.VoiceTraits)}); designing a voice.");
+                    try
+                    {
+                        match = await GenerateAsync(role, root, library, Path.GetDirectoryName(Path.GetFullPath(script))!, image, workerImage, whisper);
+                        voices = await verifiedLibrary.LoadAsync(library);
+                    }
+                    catch (Exception error) when (role.Id != "narrator" && narrator is not null &&
+                        error is IOException or InvalidDataException or System.ComponentModel.Win32Exception)
+                    {
+                        Console.WriteLine($"VoiceForge: {error.Message}");
+                        match = narrator;
+                        fallback = true;
+                    }
+                }
             }
             else Console.WriteLine($"VoiceForge: reusing attributed voice '{match.Id}' for '{role.Id}'.");
-            if (!AttributesMatch(role, match)) throw new InvalidDataException($"Voice '{match.Id}' lacks required attributes for '{role.Id}'.");
+            if (fallback) Console.WriteLine($"Casting: using narrator for '{role.Id}'; continuing audio.");
+            if (!fallback && !AttributesMatch(role, match)) throw new InvalidDataException($"Voice '{match.Id}' lacks required attributes for '{role.Id}'.");
             reserved.Add(match.Id);
-            replacements.Add(new CastingAssignment { CharacterId = role.Id, VoiceId = match.Id, Confidence = .8m,
+            replacements.Add(new CastingAssignment { CharacterId = role.Id, VoiceId = match.Id, Confidence = .8m, UsesNarratorFallback = fallback,
                 Synthesis = assignments.SingleOrDefault(item => item.CharacterId == role.Id)?.Synthesis ?? new(),
-                Rationale = "Verified speech reference and matching attributed voice; generated voices also passed a fresh Chatterbox audition. Generated attributes describe the design request." });
+                Rationale = fallback ? "Narrator fallback: character voice unavailable; continue chapter audio."
+                    : "Verified speech reference and matching attributed voice; generated voices also passed a fresh Chatterbox audition. Generated attributes describe the design request." });
         }
         var replacedIds = replacements.Select(item => item.CharacterId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var retired = assignments.Where(item => replacedIds.Contains(item.CharacterId)).ToArray();
@@ -117,8 +148,8 @@ internal static class VoiceForgeProvisioning
             if (retained is null)
             {
                 if (File.Exists(resultPath)) File.Delete(resultPath);
-                var generated = await DockerAsync(["run", "--rm", "--gpus", "all", "--entrypoint", "python", "--mount", $"type=bind,source={forgeRoot},target=/automation,readonly",
-                    "--mount", $"type=bind,source={root},target=/requests", "--mount", "type=volume,source=voiceforge-models,target=/models", image,
+                var generated = await DockerAsync(["run", "--rm", "--gpus", "all", "--entrypoint", "python", "--mount", BindMount(forgeRoot, "/automation", true),
+                    "--mount", BindMount(root, "/requests"), "--mount", "type=volume,source=voiceforge-models,target=/models", image,
                     "/automation/generate_candidate.py", "/requests/casting-request.json", "--role", role.Id, "--seed", (10000 + attempt * 1009).ToString()]);
                 if (generated != 0 || !File.Exists(resultPath)) throw new IOException($"VoiceForge generation failed for '{role.Id}'. See output above; existing casting is preserved.");
             }
@@ -131,8 +162,8 @@ internal static class VoiceForgeProvisioning
             var identity = result.RootElement.GetProperty("voiceId").GetString() ?? "";
             if (result.RootElement.GetProperty("roleId").GetString() != role.Id || !Regex.IsMatch(identity, "^voiceforge-[a-f0-9]{32}$")) throw new InvalidDataException("Invalid VoiceForge candidate identity.");
             var candidate = Path.Combine(root, "candidates", identity);
-            var verified = SavedVerification(candidate, tools) ?? await DockerAsync(["run", "--rm", "--gpus", "all", "--entrypoint", "python", "--mount", $"type=bind,source={root},target=/requests",
-                "--mount", $"type=bind,source={tools},target=/app/tools,readonly", "--mount", "type=volume,source=storycast-models,target=/models", workerImage,
+            var verified = SavedVerification(candidate, tools) ?? await DockerAsync(["run", "--rm", "--gpus", "all", "--entrypoint", "python", "--mount", BindMount(root, "/requests"),
+                "--mount", BindMount(tools, "/app/tools", true), "--mount", "type=volume,source=storycast-models,target=/models", workerImage,
                 "/app/tools/verify_generated_voice.py", $"/requests/candidates/{identity}", "--model", whisper]);
             if (verified != 0) { Console.WriteLine($"VoiceForge: '{role.Id}' candidate {attempt+1}/3 failed verification. Trying another seed. Report: {Path.Combine(candidate, "generated-verification.json")}"); continue; }
             await ImportVerifiedAsync(candidate, library, identity);

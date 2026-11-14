@@ -132,19 +132,17 @@ public sealed class CharacterRegistryMerger
             }
         }
 
-        if (matchingIndexes.Count > 1)
-        {
-            var matches = matchingIndexes.Select(
-                index => existingCharacters[index].Id);
-
-            throw new InvalidDataException(
-                $"Character discovery '{discovery.Id}' ambiguously matches: " +
-                string.Join(", ", matches));
-        }
-
-        return matchingIndexes.Count == 1
-            ? matchingIndexes[0]
-            : -1;
+        // Prefer the strongest name evidence, then keep ambiguous reuse stable
+        // across registry ordering and retries rather than interrupting audio.
+        return matchingIndexes
+            .OrderByDescending(index => NormalizeIdentityName(existingCharacters[index].DisplayName) ==
+                NormalizeIdentityName(discovery.DisplayName))
+            .ThenByDescending(index => GetIdentityNames(existingCharacters[index])
+                .Contains(NormalizeIdentityName(discovery.DisplayName)))
+            .ThenByDescending(index => GetIdentityNames(existingCharacters[index]).Intersect(discoveryNames).Count())
+            .ThenBy(index => existingCharacters[index].Id, StringComparer.OrdinalIgnoreCase)
+            .DefaultIfEmpty(-1)
+            .First();
     }
 
     private static HashSet<string> GetIdentityNames(
