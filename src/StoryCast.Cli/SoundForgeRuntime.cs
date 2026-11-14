@@ -101,8 +101,8 @@ internal static class SoundForgeRuntime
             var command = new List<string> { "run", "--detach", "--name", "soundforge", "--restart", "unless-stopped",
                 "-p", "127.0.0.1:7861:7861", "--env", $"SOUNDFORGE_DEVICE={device}",
                 "--env", $"SOUNDFORGE_HOST_ROOT={root}",
-                "--mount", $"type=bind,source={library},target=/library", "--mount", $"type=bind,source={previews},target=/data",
-                "--mount", $"type=bind,source={localModel},target=/local-model,readonly",
+                "--mount", VoiceForgeProvisioning.BindMount(library, "/library"), "--mount", VoiceForgeProvisioning.BindMount(previews, "/data"),
+                "--mount", VoiceForgeProvisioning.BindMount(localModel, "/local-model", true),
                 "--mount", "type=volume,source=soundforge-models,target=/models" };
             if (device == "cuda") command.AddRange(["--gpus", "all"]);
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HF_TOKEN"))) command.AddRange(["--env", "HF_TOKEN"]);
@@ -122,6 +122,13 @@ internal static class SoundForgeRuntime
     {
         var folder = Path.Combine(runDirectory, chapterId);
         var mixed = Path.Combine(folder, $"{chapterId}.ambience.wav");
+        var receipt = Path.Combine(runDirectory, "run.json");
+        if (File.Exists(receipt))
+        {
+            using var run = JsonDocument.Parse(File.ReadAllText(receipt));
+            if (run.RootElement.TryGetProperty("ambienceEnabled", out var enabled) && !enabled.GetBoolean())
+                return Path.Combine(folder, $"{chapterId}.mastered.wav");
+        }
         return ambienceEnabled && File.Exists(mixed) ? mixed : Path.Combine(folder, $"{chapterId}.mastered.wav");
     }
 }

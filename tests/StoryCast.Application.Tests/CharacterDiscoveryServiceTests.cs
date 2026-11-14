@@ -284,9 +284,10 @@ public sealed class CharacterDiscoveryServiceTests
             new() { Id = "copy-two", DisplayName = "Simulacrum", IsNamed = true }];
         if (isNamed)
         {
-            var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
-                new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), known));
-            Assert.Contains("ambiguously matches", error.Message);
+            var reused = Assert.Single(await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), known));
+            Assert.Equal("copy-one", reused.Id);
+            Assert.True(reused.IsNamed);
+            Assert.Equal(1, generator.Calls);
             return;
         }
         var profile = Assert.Single(await new CharacterDiscoveryService(generator).DiscoverAsync(CreateChapter(), known));

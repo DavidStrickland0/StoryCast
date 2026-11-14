@@ -383,7 +383,10 @@ public sealed partial class CharacterDiscoveryService
                     hasExistingCharacter = true;
                 }
                 else if (namedMatches.Length > 1 && candidate.IsNamed)
-                    throw new InvalidDataException($"Character '{candidate.DisplayName}' ambiguously matches known named identities.");
+                {
+                    existing = namedMatches.OrderBy(character => character.Id, StringComparer.OrdinalIgnoreCase).First();
+                    hasExistingCharacter = true;
+                }
             }
 
             var isNamed =

@@ -19,6 +19,29 @@ public sealed class VoiceForgeProvisioningTests
         Assert.Equal(new[] { "image", "inspect", "image" }, VoiceForgeProvisioning.DeviceArguments(["image", "inspect", "image"], "cpu"));
     }
 
+    [Fact]
+    public void NarratorFallbackAllowsSharedVoiceAndSurvivesProvisioning()
+    {
+        var registry = new CharacterRegistry { SchemaVersion = 1, BookId = "book", ProcessedChapterHashes = new Dictionary<string, string>(), Characters = [Maren()] };
+        CastingAssignment[] assignments = [
+            new() { CharacterId = "maren", VoiceId = "voice", UsesNarratorFallback = true },
+            new() { CharacterId = "narrator", VoiceId = "voice" }
+        ];
+        var voices = new[] { Voice("male", "clear", "steady") };
+        new StoryCast.Application.Casting.CastingAssignmentValidator().Validate(registry, voices, assignments);
+        Assert.Empty(VoiceForgeProvisioning.RolesNeedingVoices([Maren()], assignments, voices));
+        Assert.Throws<InvalidDataException>(() => new StoryCast.Application.Casting.CastingAssignmentValidator().Validate(
+            registry, voices, [new() { CharacterId = "maren", VoiceId = "voice" }, assignments[1]]));
+    }
+
+    [Theory]
+    [InlineData("/books/Magic School, Romance", "type=bind,\"source=/books/Magic School, Romance\",\"target=/requests\",readonly")]
+    [InlineData("/books/A \"voice\"", "type=bind,\"source=/books/A \"\"voice\"\"\",\"target=/requests\",readonly")]
+    public void BindMountQuotesCompleteCsvFields(string source, string expected)
+    {
+        Assert.Equal(expected, VoiceForgeProvisioning.BindMount(source, "/requests", true));
+    }
+
     private static CharacterProfile Maren() => new() { Id = "maren", DisplayName = "Maren", VoicePresentation = "female", VoiceTraits = ["gruff", "clipped"] };
     private static VoiceProfile Voice(string presentation = "female", params string[] traits) => new() { Id = "voice", SamplePath = "sample.wav", Presentation = presentation, Qualities = traits };
 

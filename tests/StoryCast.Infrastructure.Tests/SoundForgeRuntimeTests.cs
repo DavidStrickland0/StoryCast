@@ -87,6 +87,8 @@ public sealed class SoundForgeRuntimeTests
             File.WriteAllText(mixed, "mixed fixture");
             Assert.Equal(mixed, SoundForgeRuntime.PreferredAudio(root, "chapter-001", true));
             Assert.Equal(clean, SoundForgeRuntime.PreferredAudio(root, "chapter-001", false));
+            File.WriteAllText(Path.Combine(root, "run.json"), "{\"ambienceEnabled\":false,\"ambienceError\":\"HTTP 500\"}");
+            Assert.Equal(clean, SoundForgeRuntime.PreferredAudio(root, "chapter-001", true));
         }
         finally
         {

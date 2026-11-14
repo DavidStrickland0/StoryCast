@@ -139,10 +139,10 @@ public sealed class CharacterRegistryMergerTests
     }
 
     /// <summary>
-    /// Verifies that ambiguous alias matches are rejected.
+    /// Verifies that ambiguous alias matches consistently reuse an existing identity.
     /// </summary>
     [Fact]
-    public void Merge_RejectsAmbiguousIdentityMatch()
+    public void Merge_ReusesAmbiguousIdentityMatch()
     {
         var registry = new CharacterRegistry
         {
@@ -163,13 +163,45 @@ public sealed class CharacterRegistryMergerTests
 
         var merger = new CharacterRegistryMerger();
 
-        Assert.Throws<InvalidDataException>(
-            () => merger.Merge(
-                registry,
-                "test-book",
-                "chapter-002",
-                new string('b', 64),
-                [discovery]));
+        var result = merger.Merge(
+            registry,
+            "test-book",
+            "chapter-002",
+            new string('b', 64),
+            [discovery]);
+        Assert.Equal(2, result.Characters.Count);
+        Assert.Equal(new string('b', 64), result.ProcessedChapterHashes["chapter-002"]);
+    }
+
+    /// <summary>Exact names beat shared aliases; otherwise reuse is independent of registry order.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Merge_PrefersExactNameThenStableReuse(bool exactName)
+    {
+        var registry = CreateRegistry(new CharacterProfile
+        {
+            Id = "a-first", DisplayName = "First", Aliases = ["Shared"],
+            VoiceTraits = ["steady"]
+        });
+        registry = new CharacterRegistry
+        {
+            SchemaVersion = registry.SchemaVersion, BookId = registry.BookId,
+            ProcessedChapterHashes = registry.ProcessedChapterHashes,
+            Characters = [new CharacterProfile
+            {
+                Id = "z-second", DisplayName = "Second", Aliases = ["Shared"]
+            }, registry.Characters[0]]
+        };
+        var result = new CharacterRegistryMerger().Merge(registry, "test-book",
+            "chapter-002", new string('b', 64), [new CharacterProfile
+            {
+                Id = "new-id", DisplayName = exactName ? "Second" : "Shared",
+                Aliases = ["First", "Second"], VoiceTraits = ["distinctive"]
+            }]);
+        Assert.Equal(2, result.Characters.Count);
+        Assert.Equal(exactName ? "z-second" : "a-first",
+            result.Characters.Single(character => character.VoiceTraits.Contains("distinctive")).Id);
     }
 
     /// <summary>
