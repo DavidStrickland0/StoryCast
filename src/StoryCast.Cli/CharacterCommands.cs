@@ -97,7 +97,9 @@ internal static class CharacterCommands
                     ollamaUrl,
                     UriKind.Absolute),
 
-                Timeout = TimeSpan.FromMinutes(3)
+                // Allow a shared Ollama server to finish another model's request,
+                // matching the bounded timeout used by attribution and casting.
+                Timeout = TimeSpan.FromMinutes(30)
             };
 
             var generator =

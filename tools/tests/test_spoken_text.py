@@ -12,6 +12,12 @@ from spoken_text import currency_amounts, normalize_spoken_text
 
 
 class SpokenTextTests(unittest.TestCase):
+    def test_tildes_are_not_sent_to_speech(self):
+        for text in ('Hello~', '~Hello~', 'one~two', '~~~', '~5'):
+            with self.subTest(text=text):
+                self.assertNotIn('~', normalize_spoken_text(text))
+        self.assertEqual('one two', normalize_spoken_text('one~two'))
+
     def test_expands_ok_without_changing_words_or_handles(self):
         self.assertEqual('okay, okay? okay!', normalize_spoken_text('OK, Ok? ok!'))
         self.assertEqual('okay okayPlayer OK123 TOKYO', normalize_spoken_text('okay okayPlayer OK123 TOKYO'))

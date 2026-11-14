@@ -12,6 +12,28 @@ import prepare_audio_text
 
 
 class ContextPronunciationTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise the optional mechanism with fixture rules, not production defaults.
+        senses = {"bow": {"weapon_or_ribbon": "boh", "bend_or_ship_front": "bough"}}
+        self.rules = patch.object(cp, "SENSES", senses)
+        self.pattern = patch.object(cp, "PATTERN", cp.re.compile(r"\bbow\b", cp.re.IGNORECASE))
+        self.rules.start()
+        self.pattern.start()
+        self.addCleanup(self.rules.stop)
+        self.addCleanup(self.pattern.stop)
+
+    def test_empty_rules_preserve_words_and_ignore_old_saved_plans(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(cp, "SENSES", {}), patch.object(cp, "PATTERN", cp.re.compile(r"(?!)")), patch.object(cp.urllib.request, "urlopen") as request:
+            text = "Close the door. Read the content. Wind the bow."
+            path = cp.plan_path(directory, "chapter-001")
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"version": cp.VERSION, "segments": {"0": {"baseText": text, "decisions": [{"word": "close", "synthesisText": "clohss"}]}}}))
+            self.assertEqual({}, cp.load_context_plan(directory, "chapter-001"))
+            self.assertEqual([], cp.candidates_for([dict(index=0, sourceText=text)], []))
+            cp.prepare_context_pronunciations(directory, "chapter-001", [dict(index=0, sourceText=text)], "m", "url")
+            request.assert_not_called()
+            self.assertEqual([text], cp.render_units([(text, 0)], {}, text))
+
     def segments(self):
         return [dict(index=0, speakerId="narrator", sourceText="She drew her bow. Then she gave a bow.")]
 
@@ -85,3 +107,8 @@ class ContextPronunciationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class DefaultRulesTests(unittest.TestCase):
+    def test_no_automatic_words_enabled(self):
+        self.assertEqual({}, cp.SENSES)
+        self.assertIsNone(cp.PATTERN.search("close read wind content bow"))
