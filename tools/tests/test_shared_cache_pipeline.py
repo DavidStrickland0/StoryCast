@@ -23,6 +23,8 @@ class TestModel:
         self.conditionals = 0
 
     def prepare_conditionals(self, *args, **kwargs):
+        if not torch.is_inference_mode_enabled():
+            raise AssertionError('Voice conditioning must not retain a training graph.')
         self.conditionals += 1
 
     def generate(self, *args, **kwargs):

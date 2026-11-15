@@ -2,6 +2,7 @@ from __future__ import annotations
 from chat_label_recovery import apply_chunk_speech_overrides
 
 import argparse
+import ctypes
 import gc
 import hashlib
 import json
@@ -40,6 +41,16 @@ DEFAULT_TEMPERATURE = 0.7
 WORKER_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
 _CACHED_MODEL = None
 _CACHED_MODEL_FINGERPRINT = None
+
+
+def release_cpu_memory():
+    """Return unused CPU inference allocations between speech chunks."""
+    gc.collect()
+    if sys.platform == 'linux':
+        try:
+            ctypes.CDLL(None).malloc_trim(0)
+        except (AttributeError, OSError):
+            pass
 
 
 def prepare_synthesis_text(text: str) -> str:
@@ -853,7 +864,8 @@ def main(
                     print(f"  chunk {chunk_index + 1}/{len(synthesis_units)} | shared verified cache hit", flush=True)
                 else:
                     if not conditionals_prepared:
-                        model.prepare_conditionals(str(voice_sample), exaggeration=synthesis_settings['exaggeration'])
+                        with torch.inference_mode():
+                            model.prepare_conditionals(str(voice_sample), exaggeration=synthesis_settings['exaggeration'])
                         conditionals_prepared = True
                     torch.manual_seed(chunk_seed)
                     if torch.cuda.is_available():
@@ -891,6 +903,8 @@ def main(
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
+                else:
+                    release_cpu_memory()
 
             if chunk_index + 1 < len(
                 synthesis_units
