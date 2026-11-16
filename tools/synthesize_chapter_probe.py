@@ -3,6 +3,7 @@ from chat_label_recovery import apply_chunk_speech_overrides
 
 import argparse
 import ctypes
+from contextlib import contextmanager
 import gc
 import hashlib
 import json
@@ -51,6 +52,28 @@ def release_cpu_memory():
             ctypes.CDLL(None).malloc_trim(0)
         except (AttributeError, OSError):
             pass
+
+
+@contextmanager
+def cpu_generation_memory(model):
+    """Release freed allocator arenas during long CPU token-generation loops."""
+    transformer = getattr(getattr(model, 't3', None), 'tfmr', None)
+    handle = None
+    steps = 0
+
+    def after_forward(module, arguments, output):
+        nonlocal steps
+        steps += 1
+        if steps % 16 == 0:
+            release_cpu_memory()
+
+    if not torch.cuda.is_available() and transformer is not None:
+        handle = transformer.register_forward_hook(after_forward)
+    try:
+        yield
+    finally:
+        if handle is not None:
+            handle.remove()
 
 
 def prepare_synthesis_text(text: str) -> str:
@@ -870,7 +893,7 @@ def main(
                     torch.manual_seed(chunk_seed)
                     if torch.cuda.is_available():
                         torch.cuda.manual_seed_all(chunk_seed)
-                    with torch.inference_mode():
+                    with torch.inference_mode(), cpu_generation_memory(model):
                         generated_audio = model.generate(
                             synthesis_text, language_id='en', audio_prompt_path=None,
                             exaggeration=synthesis_settings['exaggeration'],

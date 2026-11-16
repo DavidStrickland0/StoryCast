@@ -33,6 +33,19 @@ class TestModel:
 
 
 class SharedCachePipelineTests(unittest.TestCase):
+    def test_cpu_allocator_cleanup_runs_during_generation_and_hook_is_removed(self):
+        transformer = torch.nn.Identity()
+        model = type('Model', (), {'t3': type('T3', (), {'tfmr': transformer})()})()
+        with patch.object(synthesis.torch.cuda, 'is_available', return_value=False), \
+             patch.object(synthesis, 'release_cpu_memory') as cleanup:
+            with self.assertRaisesRegex(RuntimeError, 'generation failed'):
+                with synthesis.cpu_generation_memory(model):
+                    for _ in range(32):
+                        transformer(torch.ones(1))
+                    self.assertEqual(2, cleanup.call_count)
+                    raise RuntimeError('generation failed')
+            self.assertFalse(transformer._forward_hooks)
+
     def test_second_book_reuses_verified_chunk_without_running_tts(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             root = Path(temporary)
