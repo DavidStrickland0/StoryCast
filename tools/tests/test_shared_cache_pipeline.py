@@ -33,6 +33,15 @@ class TestModel:
 
 
 class SharedCachePipelineTests(unittest.TestCase):
+    def test_cpu_quantization_changes_transformer_only_and_can_run_inference(self):
+        transformer = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.ReLU())
+        decoder = torch.nn.Linear(8, 8)
+        model = type('Model', (), {'t3': type('T3', (), {'tfmr': transformer})(), 's3gen': decoder})()
+        synthesis.reduce_cpu_model_memory(model)
+        self.assertIsInstance(model.t3.tfmr[0], torch.ao.nn.quantized.dynamic.Linear)
+        self.assertIs(model.s3gen, decoder)
+        self.assertEqual((1, 8), model.t3.tfmr(torch.ones(1, 8)).shape)
+
     def test_cpu_allocator_cleanup_runs_during_generation_and_hook_is_removed(self):
         transformer = torch.nn.Identity()
         model = type('Model', (), {'t3': type('T3', (), {'tfmr': transformer})()})()

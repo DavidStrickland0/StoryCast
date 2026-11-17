@@ -54,6 +54,16 @@ def release_cpu_memory():
             pass
 
 
+def reduce_cpu_model_memory(model):
+    """Quantize CPU transformer linear weights; keep the audio decoder in float32."""
+    transformer = getattr(getattr(model, 't3', None), 'tfmr', None)
+    if transformer is not None:
+        model.t3.tfmr = torch.ao.quantization.quantize_dynamic(
+            transformer.eval(), {torch.nn.Linear}, dtype=torch.qint8, inplace=True)
+        release_cpu_memory()
+        print('CPU speech transformer: dynamic int8 weights; audio verification remains enabled.', flush=True)
+
+
 @contextmanager
 def cpu_generation_memory(model):
     """Release freed allocator arenas during long CPU token-generation loops."""
@@ -672,6 +682,9 @@ def main(
             )
 
             _CACHED_MODEL, _CACHED_MODEL_FINGERPRINT = load_model_with_identity(device)
+            if device == 'cpu':
+                reduce_cpu_model_memory(_CACHED_MODEL)
+                _CACHED_MODEL_FINGERPRINT += ':cpu-transformer-int8-v1'
         else:
             print()
             print(
