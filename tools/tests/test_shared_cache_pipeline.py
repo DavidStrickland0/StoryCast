@@ -33,6 +33,23 @@ class TestModel:
 
 
 class SharedCachePipelineTests(unittest.TestCase):
+    def test_cpu_decode_preserves_all_tokens_with_bounded_overlapping_windows(self):
+        from chatterbox.mtl_tts import S3_TOKEN_RATE
+        calls = []
+        def decode(tokens, **kwargs):
+            calls.append(tokens.shape[-1])
+            return tokens.float().repeat_interleave(2, dim=-1), None
+        decoder = type('Decoder', (), {})()
+        decoder.inference = decode
+        model = type('Model', (), {'s3gen': decoder, 'sr': S3_TOKEN_RATE * 2})()
+        tokens = torch.arange(686).unsqueeze(0)
+        with patch.object(synthesis.torch.cuda, 'is_available', return_value=False):
+            with synthesis.bounded_cpu_decode(model):
+                audio, _ = decoder.inference(tokens, ref_dict={})
+        self.assertTrue(torch.equal(tokens.float().repeat_interleave(2, dim=-1), audio))
+        self.assertLessEqual(max(calls), 256)
+        self.assertIs(decoder.inference, decode)
+
     def test_cpu_quantization_changes_transformer_only_and_can_run_inference(self):
         transformer = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.ReLU())
         decoder = torch.nn.Linear(8, 8)

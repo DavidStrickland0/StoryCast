@@ -65,6 +65,41 @@ def reduce_cpu_model_memory(model):
 
 
 @contextmanager
+def bounded_cpu_decode(model, window=256, overlap=16):
+    """Decode every speech token with bounded context instead of a chapter-sized allocation."""
+    decoder = getattr(model, 's3gen', None)
+    if torch.cuda.is_available() or decoder is None:
+        yield
+        return
+    original = decoder.inference
+
+    def decode(tokens, *args, **kwargs):
+        count = tokens.shape[-1]
+        if count <= window:
+            return original(tokens, *args, **kwargs)
+        from chatterbox.mtl_tts import S3_TOKEN_RATE
+        frames_per_token = model.sr // S3_TOKEN_RATE
+        stride = window - 2 * overlap
+        pieces = []
+        for start in range(0, count, stride):
+            end = min(start + stride, count)
+            left, right = max(0, start - overlap), min(count, end + overlap)
+            audio, _ = original(tokens[..., left:right], *args, **kwargs)
+            first = (start - left) * frames_per_token
+            last = first + (end - start) * frames_per_token
+            pieces.append(audio[..., first:last].detach().cpu().clone())
+            del audio
+            release_cpu_memory()
+        return torch.cat(pieces, dim=-1), None
+
+    decoder.inference = decode
+    try:
+        yield
+    finally:
+        decoder.inference = original
+
+
+@contextmanager
 def cpu_generation_memory(model):
     """Release freed allocator arenas during long CPU token-generation loops."""
     transformer = getattr(getattr(model, 't3', None), 'tfmr', None)
@@ -906,7 +941,7 @@ def main(
                     torch.manual_seed(chunk_seed)
                     if torch.cuda.is_available():
                         torch.cuda.manual_seed_all(chunk_seed)
-                    with torch.inference_mode(), cpu_generation_memory(model):
+                    with torch.inference_mode(), cpu_generation_memory(model), bounded_cpu_decode(model):
                         generated_audio = model.generate(
                             synthesis_text, language_id='en', audio_prompt_path=None,
                             exaggeration=synthesis_settings['exaggeration'],
