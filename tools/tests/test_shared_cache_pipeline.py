@@ -45,7 +45,9 @@ class SharedCachePipelineTests(unittest.TestCase):
         tokens = torch.arange(686).unsqueeze(0)
         with patch.object(synthesis.torch.cuda, 'is_available', return_value=False):
             with synthesis.bounded_cpu_decode(model):
-                audio, _ = decoder.inference(tokens, ref_dict={})
+                audio, _ = decoder.inference(speech_tokens=tokens, ref_dict={})
+                short, _ = decoder.inference(speech_tokens=tokens[..., :8], ref_dict={})
+                self.assertTrue(torch.equal(tokens[..., :8].float().repeat_interleave(2, dim=-1), short))
         self.assertTrue(torch.equal(tokens.float().repeat_interleave(2, dim=-1), audio))
         self.assertLessEqual(max(calls), 256)
         self.assertIs(decoder.inference, decode)

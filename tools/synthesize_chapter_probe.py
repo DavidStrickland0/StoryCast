@@ -73,7 +73,8 @@ def bounded_cpu_decode(model, window=256, overlap=16):
         return
     original = decoder.inference
 
-    def decode(tokens, *args, **kwargs):
+    def decode(speech_tokens, *args, **kwargs):
+        tokens = speech_tokens
         count = tokens.shape[-1]
         if count <= window:
             return original(tokens, *args, **kwargs)
