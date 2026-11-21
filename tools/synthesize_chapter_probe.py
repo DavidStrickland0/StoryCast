@@ -288,7 +288,15 @@ def move_model(model, device: str) -> None:
 
 
 def park_cached_model() -> None:
+    global _CACHED_MODEL, _CACHED_MODEL_FINGERPRINT
     if _CACHED_MODEL is None:
+        return
+
+    if not torch.cuda.is_available():
+        _CACHED_MODEL = None
+        _CACHED_MODEL_FINGERPRINT = None
+        release_cpu_memory()
+        print('Released CPU speech model before verification.', flush=True)
         return
 
     move_model(_CACHED_MODEL, "cpu")

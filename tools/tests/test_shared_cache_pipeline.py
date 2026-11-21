@@ -33,6 +33,16 @@ class TestModel:
 
 
 class SharedCachePipelineTests(unittest.TestCase):
+    def test_cpu_speech_model_is_unloaded_before_verification(self):
+        with patch.object(synthesis, '_CACHED_MODEL', object()), \
+             patch.object(synthesis, '_CACHED_MODEL_FINGERPRINT', 'model'), \
+             patch.object(synthesis.torch.cuda, 'is_available', return_value=False), \
+             patch.object(synthesis, 'release_cpu_memory') as release:
+            synthesis.park_cached_model()
+            self.assertIsNone(synthesis._CACHED_MODEL)
+            self.assertIsNone(synthesis._CACHED_MODEL_FINGERPRINT)
+            release.assert_called_once()
+
     def test_cpu_decode_preserves_all_tokens_with_bounded_overlapping_windows(self):
         from chatterbox.mtl_tts import S3_TOKEN_RATE
         calls = []

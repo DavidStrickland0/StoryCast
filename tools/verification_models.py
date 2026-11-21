@@ -1,5 +1,7 @@
 """Chapter-scoped speech verifier reuse across selective retry passes."""
 import gc
+import ctypes
+import sys
 
 
 class VerificationModels:
@@ -29,3 +31,8 @@ class VerificationModels:
         self.primaries.clear()
         self.secondaries.clear()
         gc.collect()
+        if sys.platform == 'linux':
+            try:
+                ctypes.CDLL(None).malloc_trim(0)
+            except (AttributeError, OSError):
+                pass

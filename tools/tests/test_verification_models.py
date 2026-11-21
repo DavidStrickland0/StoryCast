@@ -1,4 +1,5 @@
 import sys
+import io
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,10 +7,22 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from verification_models import VerificationModels
-from produce_chapter import PersistentVerificationRunner
+from produce_chapter import PersistentVerificationRunner, PersistentSynthesisWorker, SYNTHESIS_RESULT_PREFIX
 
 
 class VerificationModelsTests(unittest.TestCase):
+    def test_synthesis_releases_verifiers_before_sending_retry(self):
+        worker = PersistentSynthesisWorker.__new__(PersistentSynthesisWorker)
+        stream = io.StringIO()
+        def release():
+            self.assertEqual('', stream.getvalue())
+        worker.before_run = Mock(side_effect=release)
+        worker.process = SimpleNamespace(stdin=stream, stdout=io.StringIO(
+            SYNTHESIS_RESULT_PREFIX + '{"ok": true, "exitCode": 0}\n'))
+        self.assertEqual(0, worker.run('retry', ['python', 'synthesis.py', 'book']))
+        worker.before_run.assert_called_once()
+        self.assertIn('book', stream.getvalue())
+
     def test_primary_loads_once_across_retry_passes(self):
         constructor = Mock()
         with patch.dict(sys.modules, {'faster_whisper': SimpleNamespace(WhisperModel=constructor)}):
