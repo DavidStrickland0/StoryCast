@@ -48,10 +48,14 @@ class PersistentVerificationRunner:
 class PersistentSynthesisWorker:
     def __init__(self, script_path: Path, before_run=None) -> None:
         self.before_run = before_run
+        self.script_path = script_path
+        self.start()
+
+    def start(self):
         self.process = subprocess.Popen(
             [
                 sys.executable,
-                str(script_path),
+                str(self.script_path),
                 "--persistent-worker",
             ],
             stdin=subprocess.PIPE,
@@ -67,6 +71,9 @@ class PersistentSynthesisWorker:
     ) -> int:
         if self.before_run is not None:
             self.before_run()
+        if self.process.poll() is not None:
+            print('Restarting exited synthesis worker for saved selective retry.', flush=True)
+            self.start()
         if self.process.stdin is None or self.process.stdout is None:
             raise RuntimeError("Synthesis worker pipes are unavailable.")
 
