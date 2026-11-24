@@ -49,3 +49,4 @@ models/
 /build/
 *.before-*
 /tools/test_produce_chapter.py
+/voices/

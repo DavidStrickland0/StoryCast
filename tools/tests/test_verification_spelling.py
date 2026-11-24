@@ -8,6 +8,22 @@ from verify_chapter_probe import classify_verification
 
 
 class VerificationSpellingTests(unittest.TestCase):
+    def test_toward_variant_does_not_hide_plural_changes(self):
+        self.assertEqual(normalize_words('pointing toward several highlighted entries'),
+                         normalize_words('pointing towards several highlighted entries'))
+        self.assertNotEqual(normalize_words('She shifted the papers slightly against her side.'),
+                            normalize_words('She shifted the paper slightly against her side.'))
+
+    def test_queue_number_asr_spelling(self):
+        expected = 'Marcus stepped into the rear section of Queue Eight and adjusted the cuff of his sleeve while the line shifted forward in uneven waves.'
+        for spelling in ('Q8', 'q8', 'Q 8', 'Queue 8'):
+            heard = expected.replace('Queue Eight', spelling)
+            self.assertEqual(normalize_words(expected), normalize_words(heard))
+        for spelling in ('Q9', 'Q80', 'Q8A', 'Q8.5', 'Eight'):
+            heard = expected.replace('Queue Eight', spelling)
+            self.assertNotEqual(normalize_words(expected), normalize_words(heard))
+        self.assertNotEqual(normalize_words(expected), normalize_words(expected.replace('Queue Eight', 'Q8').replace('rear section of ', '')))
+
     def test_remaining_chapter_chunks_pass_equivalent_spoken_spellings(self):
         pairs = [
             ('"Likely taken by goblins. Maybe sold to a merchant nearby."',

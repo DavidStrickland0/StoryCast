@@ -838,9 +838,15 @@ def main(
                     f"{len(chunk_text)} characters",
                     flush=True,
                 )
+                # After repeated recognition failures, try a more restrained
+                # sample with stronger text guidance, only for this rejected
+                # chunk. Passing audio and manuscript wording stay intact.
+                chunk_settings = dict(synthesis_settings)
+                if is_retry and args.attempt >= 3:
+                    chunk_settings.update(temperature=0.3, cfgWeight=0.8, exaggeration=0.3)
                 cache_inputs = chunk_identity(
                     chunk_text, synthesis_text, voice_id, synthesis_settings['referenceSha256'],
-                    synthesis_settings, _CACHED_MODEL_FINGERPRINT, model.sr, cache_runtime,
+                    chunk_settings, _CACHED_MODEL_FINGERPRINT, model.sr, cache_runtime,
                     delivery=segment.get('delivery', ''), performance=segment.get('performance'),
                     context=contextual_units[chunk_index][1], pause=pause_after_seconds, attempt=args.attempt)
                 chunk_seed = cache_inputs['seed']
@@ -853,7 +859,7 @@ def main(
                     print(f"  chunk {chunk_index + 1}/{len(synthesis_units)} | shared verified cache hit", flush=True)
                 else:
                     if not conditionals_prepared:
-                        model.prepare_conditionals(str(voice_sample), exaggeration=synthesis_settings['exaggeration'])
+                        model.prepare_conditionals(str(voice_sample), exaggeration=chunk_settings['exaggeration'])
                         conditionals_prepared = True
                     torch.manual_seed(chunk_seed)
                     if torch.cuda.is_available():
@@ -861,8 +867,8 @@ def main(
                     with torch.inference_mode():
                         generated_audio = model.generate(
                             synthesis_text, language_id='en', audio_prompt_path=None,
-                            exaggeration=synthesis_settings['exaggeration'],
-                            cfg_weight=synthesis_settings['cfgWeight'], temperature=synthesis_settings['temperature'])
+                            exaggeration=chunk_settings['exaggeration'],
+                            cfg_weight=chunk_settings['cfgWeight'], temperature=chunk_settings['temperature'])
                     chunk_audio = generated_audio.detach().to(device='cpu', dtype=torch.float32)
                     del generated_audio
                     chunk_audio, audio_processing = polish_audio(chunk_audio, model.sr)

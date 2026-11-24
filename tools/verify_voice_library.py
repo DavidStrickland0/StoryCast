@@ -35,6 +35,10 @@ def parse_args() -> argparse.Namespace:
 
 def normalize_words(text: str) -> list[str]:
     text = text.replace("\u2019", "'")
+    text = re.sub(r"\btowards\b", "toward", text, flags=re.IGNORECASE)
+    # ASR may write the homophone "queue eight" as "Q8". Limit this
+    # equivalence to Q followed by an integer; keep numbers and suffixes intact.
+    text = re.sub(r"\bq\s*(\d+)\b(?!\.\d)", r"queue \1", text, flags=re.IGNORECASE)
     # Unambiguous auxiliary contractions share a spoken form with the
     # expansion commonly returned by ASR. Do not expand ambiguous 's or 'd.
     text = re.sub(r"\b([A-Za-z]+)'ve\b", r"\1 have", text, flags=re.IGNORECASE)
