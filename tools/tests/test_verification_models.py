@@ -1,4 +1,5 @@
 import sys
+import io
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,10 +7,34 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from verification_models import VerificationModels
-from produce_chapter import PersistentVerificationRunner
+from produce_chapter import PersistentVerificationRunner, PersistentSynthesisWorker, SYNTHESIS_RESULT_PREFIX
 
 
 class VerificationModelsTests(unittest.TestCase):
+    def test_synthesis_releases_verifiers_before_sending_retry(self):
+        worker = PersistentSynthesisWorker.__new__(PersistentSynthesisWorker)
+        stream = io.StringIO()
+        def release():
+            self.assertEqual('', stream.getvalue())
+        worker.before_run = Mock(side_effect=release)
+        worker.process = SimpleNamespace(poll=lambda: None, stdin=stream, stdout=io.StringIO(
+            SYNTHESIS_RESULT_PREFIX + '{"ok": true, "exitCode": 0}\n'))
+        self.assertEqual(0, worker.run('retry', ['python', 'synthesis.py', 'book']))
+        worker.before_run.assert_called_once()
+        self.assertIn('book', stream.getvalue())
+
+    def test_exited_synthesis_worker_is_restarted_before_retry(self):
+        worker = PersistentSynthesisWorker.__new__(PersistentSynthesisWorker)
+        worker.before_run = None
+        worker.process = SimpleNamespace(poll=lambda: -9)
+        stream = io.StringIO()
+        replacement = SimpleNamespace(stdin=stream, stdout=io.StringIO(
+            SYNTHESIS_RESULT_PREFIX + '{"ok": true, "exitCode": 0}\n'))
+        worker.start = Mock(side_effect=lambda: setattr(worker, 'process', replacement))
+        self.assertEqual(0, worker.run('retry', ['python', 'synthesis.py', 'book']))
+        worker.start.assert_called_once()
+        self.assertIn('book', stream.getvalue())
+
     def test_primary_loads_once_across_retry_passes(self):
         constructor = Mock()
         with patch.dict(sys.modules, {'faster_whisper': SimpleNamespace(WhisperModel=constructor)}):

@@ -2,6 +2,8 @@ from __future__ import annotations
 from chat_label_recovery import apply_chunk_speech_overrides
 
 import argparse
+import ctypes
+from contextlib import contextmanager
 import gc
 import hashlib
 import json
@@ -40,6 +42,84 @@ DEFAULT_TEMPERATURE = 0.7
 WORKER_RESULT_PREFIX = "__STORYCAST_SYNTHESIS_RESULT__"
 _CACHED_MODEL = None
 _CACHED_MODEL_FINGERPRINT = None
+
+
+def release_cpu_memory():
+    """Return unused CPU inference allocations between speech chunks."""
+    gc.collect()
+    if sys.platform == 'linux':
+        try:
+            ctypes.CDLL(None).malloc_trim(0)
+        except (AttributeError, OSError):
+            pass
+
+
+def reduce_cpu_model_memory(model):
+    """Quantize CPU transformer linear weights; keep the audio decoder in float32."""
+    transformer = getattr(getattr(model, 't3', None), 'tfmr', None)
+    if transformer is not None:
+        model.t3.tfmr = torch.ao.quantization.quantize_dynamic(
+            transformer.eval(), {torch.nn.Linear}, dtype=torch.qint8, inplace=True)
+        release_cpu_memory()
+        print('CPU speech transformer: dynamic int8 weights; audio verification remains enabled.', flush=True)
+
+
+@contextmanager
+def bounded_cpu_decode(model, window=256, overlap=16):
+    """Decode every speech token with bounded context instead of a chapter-sized allocation."""
+    decoder = getattr(model, 's3gen', None)
+    if torch.cuda.is_available() or decoder is None:
+        yield
+        return
+    original = decoder.inference
+
+    def decode(speech_tokens, *args, **kwargs):
+        tokens = speech_tokens
+        count = tokens.shape[-1]
+        if count <= window:
+            return original(tokens, *args, **kwargs)
+        from chatterbox.mtl_tts import S3_TOKEN_RATE
+        frames_per_token = model.sr // S3_TOKEN_RATE
+        stride = window - 2 * overlap
+        pieces = []
+        for start in range(0, count, stride):
+            end = min(start + stride, count)
+            left, right = max(0, start - overlap), min(count, end + overlap)
+            audio, _ = original(tokens[..., left:right], *args, **kwargs)
+            first = (start - left) * frames_per_token
+            last = first + (end - start) * frames_per_token
+            pieces.append(audio[..., first:last].detach().cpu().clone())
+            del audio
+            release_cpu_memory()
+        return torch.cat(pieces, dim=-1), None
+
+    decoder.inference = decode
+    try:
+        yield
+    finally:
+        decoder.inference = original
+
+
+@contextmanager
+def cpu_generation_memory(model):
+    """Release freed allocator arenas during long CPU token-generation loops."""
+    transformer = getattr(getattr(model, 't3', None), 'tfmr', None)
+    handle = None
+    steps = 0
+
+    def after_forward(module, arguments, output):
+        nonlocal steps
+        steps += 1
+        if steps % 16 == 0:
+            release_cpu_memory()
+
+    if not torch.cuda.is_available() and transformer is not None:
+        handle = transformer.register_forward_hook(after_forward)
+    try:
+        yield
+    finally:
+        if handle is not None:
+            handle.remove()
 
 
 def prepare_synthesis_text(text: str) -> str:
@@ -208,7 +288,15 @@ def move_model(model, device: str) -> None:
 
 
 def park_cached_model() -> None:
+    global _CACHED_MODEL, _CACHED_MODEL_FINGERPRINT
     if _CACHED_MODEL is None:
+        return
+
+    if not torch.cuda.is_available():
+        _CACHED_MODEL = None
+        _CACHED_MODEL_FINGERPRINT = None
+        release_cpu_memory()
+        print('Released CPU speech model before verification.', flush=True)
         return
 
     move_model(_CACHED_MODEL, "cpu")
@@ -638,6 +726,9 @@ def main(
             )
 
             _CACHED_MODEL, _CACHED_MODEL_FINGERPRINT = load_model_with_identity(device)
+            if device == 'cpu':
+                reduce_cpu_model_memory(_CACHED_MODEL)
+                _CACHED_MODEL_FINGERPRINT += ':cpu-transformer-int8-v1'
         else:
             print()
             print(
@@ -735,7 +826,7 @@ def main(
 
         temporary_output_path = (
             chapter_directory /
-            f".segment-{segment_index:04d}.wav.tmp"
+            f".segment-{segment_index:04d}.tmp.wav"
         )
 
         print(
@@ -859,12 +950,13 @@ def main(
                     print(f"  chunk {chunk_index + 1}/{len(synthesis_units)} | shared verified cache hit", flush=True)
                 else:
                     if not conditionals_prepared:
-                        model.prepare_conditionals(str(voice_sample), exaggeration=chunk_settings['exaggeration'])
+                        with torch.inference_mode():
+                            model.prepare_conditionals(str(voice_sample), exaggeration=chunk_settings['exaggeration'])
                         conditionals_prepared = True
                     torch.manual_seed(chunk_seed)
                     if torch.cuda.is_available():
                         torch.cuda.manual_seed_all(chunk_seed)
-                    with torch.inference_mode():
+                    with torch.inference_mode(), cpu_generation_memory(model), bounded_cpu_decode(model):
                         generated_audio = model.generate(
                             synthesis_text, language_id='en', audio_prompt_path=None,
                             exaggeration=chunk_settings['exaggeration'],
@@ -872,7 +964,7 @@ def main(
                     chunk_audio = generated_audio.detach().to(device='cpu', dtype=torch.float32)
                     del generated_audio
                     chunk_audio, audio_processing = polish_audio(chunk_audio, model.sr)
-                    chunk_temporary_path = chunk_output_path.with_name(f'.{chunk_output_path.name}.tmp')
+                    chunk_temporary_path = chunk_output_path.with_name(f'.{chunk_output_path.stem}.tmp.wav')
                     torchaudio.save(str(chunk_temporary_path), chunk_audio, model.sr, format='wav')
                     chunk_temporary_path.replace(chunk_output_path)
                 chunk_record = {
@@ -897,6 +989,8 @@ def main(
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
+                else:
+                    release_cpu_memory()
 
             if chunk_index + 1 < len(
                 synthesis_units
