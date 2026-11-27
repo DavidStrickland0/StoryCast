@@ -8,10 +8,26 @@ from pathlib import Path
 from export_chapter import (
     chapter_number,
     chapter_title,
+    final_mp3_path,
 )
 
 
 class ChapterExportTests(unittest.TestCase):
+    def test_partial_book_uses_title_numbers_without_collisions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            book = Path(directory)
+            titles = ["Chapter 19: Arrival", "Chapter 21 The Gate", "Chapter 21: Part Two", "Interlude"]
+            paths = [f"{index}.txt" for index in range(len(titles))]
+            (book / "book.json").write_text(json.dumps({"chapters": paths}), encoding="utf-8")
+            (book / "source.json").write_text(json.dumps({
+                "sourceUrl": "https://novgo.net/example.html",
+                "chapters": [{"path": path, "title": title} for path, title in zip(paths, titles)],
+            }), encoding="utf-8")
+            self.assertEqual(
+                ["chapter-019.mp3", "chapter-021.mp3", "chapter-021-track-003.mp3", "chapter-track-004.mp3"],
+                [final_mp3_path(book, f"chapter-{index:03d}").name for index in range(1, 5)],
+            )
+
     def test_preserves_captured_page_titles_in_partial_book(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             book = Path(directory)

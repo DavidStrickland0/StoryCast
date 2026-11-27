@@ -11,6 +11,7 @@ from book_manifest import resolve_book_manifest
 
 DEFAULT_BITRATE = "64k"
 CHAPTER_END_PADDING_SECONDS = 1.0
+CAPTURED_CHAPTER_NUMBER = re.compile(r"^Chapter\s+([0-9]{1,9})(?![0-9]|\.\d)\b", re.IGNORECASE)
 
 
 def load_json(path: Path) -> dict:
@@ -152,6 +153,42 @@ def production_chapter_title(
     return f"Chapter {track_number}"
 
 
+def final_mp3_path(book: Path, chapter_id: str) -> Path:
+    """Use the captured chapter number for ScribbleCast exports."""
+    directory = book / "output" / "final"
+    source = book / "source.json"
+    if not source.is_file():
+        return directory / f"{chapter_id}.mp3"
+    capture = load_json(source)
+    if not capture.get("sourceUrl"):
+        return directory / f"{chapter_id}.mp3"
+    tracks = load_json(resolve_book_manifest(book))["chapters"]
+    titles = {record.get("path"): record.get("title", "").strip()
+              for record in capture.get("chapters", [])}
+    index = chapter_number(chapter_id) - 1
+    title = titles.get(tracks[index], "")
+    match = CAPTURED_CHAPTER_NUMBER.match(title)
+    if not match:
+        return directory / f"chapter-track-{index + 1:03d}.mp3"
+    number = int(match.group(1))
+    target = directory / f"chapter-{number:03d}.mp3"
+    for track in tracks[:index]:
+        previous = CAPTURED_CHAPTER_NUMBER.match(titles.get(track, ""))
+        if previous and int(previous.group(1)) == number:
+            return directory / f"{target.stem}-track-{index + 1:03d}.mp3"
+    if target.is_file():
+        # A legacy positional export may already own this filename.
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format_tags=title,track",
+             "-of", "json", str(target)],
+            capture_output=True, encoding="utf-8", errors="replace",
+        )
+        tags = json.loads(probe.stdout).get("format", {}).get("tags", {}) if probe.returncode == 0 else {}
+        if tags.get("title") != title or tags.get("track", "").split("/")[0] != str(index + 1):
+            return directory / f"{target.stem}-track-{index + 1:03d}.mp3"
+    return target
+
+
 def run_ffmpeg(    arguments: list[str],
 ) -> None:
     """Run FFmpeg and raise a descriptive error on failure."""
@@ -241,10 +278,7 @@ def main() -> int:
         exist_ok=True,
     )
 
-    output_path = (
-        final_directory /
-        f"{args.chapter_id}.mp3"
-    )
+    output_path = final_mp3_path(book, args.chapter_id)
 
     temporary_path = (
         final_directory /

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from book_manifest import resolve_book_manifest
+from export_chapter import final_mp3_path
 from prepare_audio_text import prepare_chapter
 from spoken_text import has_spoken_content
 from pronunciations import load_pronunciations, pronunciation_fingerprint
@@ -1935,12 +1936,7 @@ def main() -> int:
             report["reviewRequired"] |= dialogue_review.get("reviewRequired", False)
         report["allowReview"] = args.allow_review
 
-        final_audio = (
-            book /
-            "output" /
-            "final" /
-            f"{args.chapter}.mp3"
-        )
+        final_audio = final_mp3_path(book, args.chapter)
 
         export_report_path = (
             chapter_directory /

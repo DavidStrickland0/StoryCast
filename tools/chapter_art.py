@@ -247,15 +247,16 @@ def embed_existing(mp3, image):
         temporary.unlink(missing_ok=True)
 
 
-def update_export_receipts(book, chapter, image, before, after):
+def update_export_receipts(book, chapter, image, before, after, audio=None):
     """Keep completed-run provenance valid after a verified metadata-only change."""
+    audio = audio or book / "output/final" / f"{chapter}.mp3"
     for path in (book / "output").glob("*/run.json"):
         report = load(path)
         if report.get("chapterId") != chapter or report.get("status") != "completed":
             continue
         checkpoint = report.get("stageCheckpoints", {}).get("mp3Export", {})
         outputs = checkpoint.get("outputs", [])
-        mp3 = next((item for item in outputs if item.get("path", "").replace("\\", "/").endswith(f"/final/{chapter}.mp3")
+        mp3 = next((item for item in outputs if re.search(r"/output/final/[^/]+\.mp3$", item.get("path", "").replace("\\", "/"))
                     and item.get("sha256") == before), None)
         if mp3 is None:
             continue
@@ -268,6 +269,8 @@ def update_export_receipts(book, chapter, image, before, after):
                 if output.get("path", "").replace("\\", "/").endswith(f"/{chapter}/chapter-export.json"):
                     output["sha256"] = hashlib.sha256(export_path.read_bytes()).hexdigest()
         mp3["sha256"] = after
+        mp3["path"] = str(audio)
+        report["finalAudioPath"] = str(audio)
         report["illustration"] = dict(status="ready", image=str(image), visualReviewRequired=True)
         report.setdefault("artworkUpdates", []).append(dict(beforeSha256=before, afterSha256=after,
                                                             compressedAudioUnchanged=True, image=str(image)))
@@ -297,14 +300,38 @@ def main():
             except (OSError, ValueError) as error:
                 print(f"Waiting for the Docker image renderer: {error}", flush=True)
             time.sleep(30)
-    chapters = [f"chapter-{int(n):03d}" for n in args.chapters.split(",")] if args.chapters else [p.stem for p in sorted((args.book / "output/final").glob("chapter-*.mp3"))]
+    directory = args.book / "output/final"
+    from export_chapter import final_mp3_path
+    audio_by_chapter = {}
+    for path in (args.book / "output").glob("*/run.json"):
+        report = load(path)
+        if report.get("status") != "completed" or not report.get("finalAudioPath"):
+            continue
+        chapter = report["chapterId"]
+        audio = directory / report["finalAudioPath"].replace("\\", "/").rsplit("/", 1)[-1]
+        outputs = report.get("stageCheckpoints", {}).get("mp3Export", {}).get("outputs", [])
+        recorded_hash = next((item["sha256"] for item in outputs if item["path"].replace("\\", "/").endswith(f"/final/{audio.name}")), None)
+        if recorded_hash:
+            for candidate in dict.fromkeys((audio, final_mp3_path(args.book, chapter))):
+                if candidate.is_file() and hashlib.sha256(candidate.read_bytes()).hexdigest() == recorded_hash:
+                    audio_by_chapter[chapter] = candidate
+                    break
+    claimed = set(audio_by_chapter.values())
+    for path in directory.glob("chapter-*.mp3"):
+        if path not in claimed and re.fullmatch(r"chapter-\d+", path.stem):
+            audio_by_chapter.setdefault(path.stem, path)
+    if args.chapters:
+        chapters = [f"chapter-{int(n):03d}" for n in args.chapters.split(",")]
+    else:
+        chapters = sorted(audio_by_chapter)
     failed = 0
     for chapter in chapters:
         try:
             image = ensure_art(args.book, chapter, args.ollama_url)
             if image:
-                before, after = embed_existing(args.book / "output/final" / f"{chapter}.mp3", image)
-                update_export_receipts(args.book, chapter, image, before, after)
+                audio = audio_by_chapter.get(chapter, directory / f"{chapter}.mp3")
+                before, after = embed_existing(audio, image)
+                update_export_receipts(args.book, chapter, image, before, after, audio)
                 (args.book / "illustrations/pending" / f"{chapter}.json").unlink(missing_ok=True)
                 print(f"Illustrated {chapter}: {image}", flush=True)
         except Exception as error:
